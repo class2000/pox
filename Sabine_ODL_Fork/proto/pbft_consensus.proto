@@ -1,0 +1,76 @@
+syntax = "proto3";
+
+option go_package = "ryu_pbft/proto;pbftconsensus";
+
+package pbftconsensus;
+
+// Represents the core information from an OpenFlow PacketIn message
+message PacketInfo {
+    string dpid = 1;         // Datapath ID as string
+    uint32 in_port = 2;      // Input port number
+    uint32 buffer_id = 3;    // Buffer ID from the switch (important for PacketOut)
+    uint32 total_len = 4;    // Total length of the packet
+    bytes data = 5;          // Raw packet data (bytes)
+    // Add other relevant fields from PacketIn.msg or msg.match if needed by logic
+    // e.g., eth_src, eth_dst, ip_src, ip_dst, etc. Might be better to parse
+    // deterministically within the Ryu logic instead of passing all parsed fields.
+}
+
+// Represents the action computed by Ryu (can be PacketOut or FlowMod)
+// Using JSON string for flexibility initially. Could be more structured later.
+message Action {
+    string action_json = 1; // JSON representation of the action (e.g., {"type": "packet_out", "out_port": 5} or {"type": "flow_mod", ...})
+    // Alternatively, use specific fields:
+    // enum ActionType { PACKET_OUT = 0; FLOW_MOD = 1; }
+    // ActionType type = 1;
+    // uint32 out_port = 2; // For PacketOut
+    // string match_fields_json = 3; // For FlowMod Match
+    // string action_list_json = 4; // For FlowMod Actions
+    // uint32 priority = 5; // For FlowMod
+    // uint32 idle_timeout = 6; // For FlowMod
+    // uint32 hard_timeout = 7; // For FlowMod
+    // uint64 cookie = 8; // For FlowMod
+}
+
+
+// === Service for PBFT Dealer interaction (used by Ryu Primary) ===
+
+// Request sent from Ryu Primary to PBFT Dealer
+message ConsensusRequest {
+    PacketInfo packet_info = 1;
+    Action proposed_action = 2; // The action computed by the Primary
+}
+
+// Response sent from PBFT Dealer to Ryu Primary
+message ConsensusResponse {
+    Action final_action = 1; // The consensus-agreed action
+    bool consensus_reached = 2; // Indicates if consensus was successful
+    string status_message = 3; // e.g., "Consensus OK" or "Discrepancy Detected"
+}
+
+// The service definition for the PBFT Dealer
+service PBFTConsensus {
+    // Ryu Primary calls this to initiate consensus
+    rpc RequestConsensus(ConsensusRequest) returns (ConsensusResponse);
+}
+
+
+// === Service for Ryu Replica interaction (used by PBFT Nodes) ===
+
+// Request sent from PBFT Node to Ryu Replica
+message CalculateActionRequest {
+    PacketInfo packet_info = 1;
+    // Could include TxID for logging/correlation if needed
+    // string tx_id = 2;
+}
+
+// Response sent from Ryu Replica to PBFT Node
+message CalculateActionResponse {
+    Action computed_action = 1;
+}
+
+// The service definition for the Ryu Replicas
+service RyuReplicaLogic {
+    // PBFT Node calls this to get deterministic action from a replica
+    rpc CalculateAction(CalculateActionRequest) returns (CalculateActionResponse);
+}

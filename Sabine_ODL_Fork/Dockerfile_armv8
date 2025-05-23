@@ -1,0 +1,9 @@
+FROM golang:latest as builder
+LABEL stage=builder
+WORKDIR /app
+ADD . /app
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o pbftnode
+
+FROM arm64v8/alpine:latest
+WORKDIR /root/
+COPY --from=builder /app/pbftnode /bin
