@@ -7,9 +7,10 @@ import (
 	"net"             // <<< ADDED IMPORT
 	"time"            // <<< ADDED IMPORT
 
-	"github.com/rs/zerolog/log"
-	"pbftnode/source/Blockchain"
 	pbftconsensus_pb "pbftnode/proto" // Alias for clarity if needed
+	"pbftnode/source/Blockchain"
+
+	"github.com/rs/zerolog/log"
 )
 
 // --- State Constants ---
@@ -17,8 +18,8 @@ import (
 type consensusState int8
 
 const (
-	NewRoundSt consensusState = iota // Waiting for PrePrepare or timeout
-	NewRoundProposerSt               // Proposer: Ready to create a block
+	NewRoundSt         consensusState = iota // Waiting for PrePrepare or timeout
+	NewRoundProposerSt                       // Proposer: Ready to create a block
 	// PrePreparedSt is not an explicit state here; handled within NewRoundSt logic
 	PreparedSt       // Received valid PrePrepare, waiting for Prepare messages
 	CommittedSt      // Received enough Prepare messages, waiting for Commit messages
@@ -50,18 +51,13 @@ func (id consensusState) String() string {
 }
 
 // --- ADDED INTERFACE DEFINITION ---
-// stateInterf defines the methods required by each consensus state handler.
+
 type stateInterf interface {
-	testState(Blockchain.Message) bool                      // Checks if a message is relevant to this state
-	giveMeNext(*Blockchain.Message) Blockchain.Payload      // Determines if conditions are met to transition *out* of this state
-	update(payload Blockchain.Payload) *Blockchain.Message // Performs actions upon transitioning *out* of this state
+	testState(Blockchain.Message) bool
+	giveMeNext(*Blockchain.Message) Blockchain.Payload
+	update(payload Blockchain.Payload) *Blockchain.Message
 }
 
-// --- /ADDED INTERFACE DEFINITION ---
-
-// --- State Struct Definitions and Methods ---
-
-// NewRound represents the state where a non-proposer node is waiting for a valid PrePrepare message.
 type NewRound struct {
 	*PBFTStateConsensus
 }
@@ -119,10 +115,6 @@ type NewRoundProposer struct {
 	*PBFTStateConsensus
 }
 
-// testState checks if the transaction pool is non-empty.
-// For a proposer, the triggering condition is often just being in this state
-// and having transactions, or a timeout forcing an empty block.
-// For simplicity, we use the transaction pool emptiness.
 func (consensus NewRoundProposer) testState(message Blockchain.Message) bool {
 	return !consensus.TransactionPool.IsEmpty()
 }
@@ -142,14 +134,14 @@ func (consensus NewRoundProposer) giveMeNext(message *Blockchain.Message) Blockc
 }
 
 // update transitions the proposer from NewRoundProposer to NewRound (after broadcasting PrePrepare).
-// The proposer itself will then process its own PrePrepare as if it came from another node.
+
 func (consensus *NewRoundProposer) update(payload Blockchain.Payload) *Blockchain.Message {
 	block, ok := payload.(Blockchain.Block)
 	if !ok {
 		log.Error().Msg("Invalid payload type in NewRoundProposer.update, expected Block")
 		return nil
 	}
-	consensus.currentHash = block.Hash      // Set current hash for this round
+	consensus.currentHash = block.Hash  // Set current hash for this round
 	consensus.BlockPool.AddBlock(block) // Add to our own block pool
 	log.Info().Int("seqNb", block.SequenceNb).Msg("update (NewRoundProposer): Broadcasting PrePrepare.")
 	message := Blockchain.Message{
@@ -157,8 +149,8 @@ func (consensus *NewRoundProposer) update(payload Blockchain.Payload) *Blockchai
 		Data: block,
 	}
 	consensus.SocketHandler.BroadcastMessage(message)
-	consensus.updateState(NewRoundSt) // After proposing, proposer acts like a regular node waiting for prepares
-	return &message                   // Return the PrePrepare so it can be processed by the node itself
+	consensus.updateState(NewRoundSt)
+	return &message
 }
 
 // Prepared represents the state waiting for enough Prepare messages.
@@ -219,8 +211,8 @@ func (consensus Committed) testState(message Blockchain.Message) bool {
 // giveMeNext checks if enough matching Commit messages have been received to finalize the block.
 func (consensus Committed) giveMeNext(message *Blockchain.Message) Blockchain.Payload {
 	if consensus.CommitPool.GetNbPrepareOfHashOfActive(string(consensus.currentHash), consensus.Validators) >= consensus.MinApprovals() {
-		block := consensus.BlockPool.GetBlock(consensus.currentHash) // Retrieve the block from our pool
-		if block.Hash != nil {                                        // Check if block was found
+		block := consensus.BlockPool.GetBlock(consensus.currentHash)
+		if block.Hash != nil {
 			log.Debug().Str("hash", base64.StdEncoding.EncodeToString(consensus.currentHash)).Msg("giveMeNext (Committed): Reached Commit threshold.")
 			return block
 		}
@@ -259,7 +251,6 @@ func (consensus *Committed) update(payload Blockchain.Payload) *Blockchain.Messa
 				ReportingNode: consensus.Wallet.PublicKey(),
 			}
 
-			// TODO: Make dealerAddr configurable (e.g., via NodeArg or environment variable)
 			dealerAddr := "pbft-dealer:5000" // Default for Docker Compose setup
 
 			// Send in a goroutine to avoid blocking consensus
@@ -294,11 +285,6 @@ func (consensus *Committed) update(payload Blockchain.Payload) *Blockchain.Messa
 					Flag: Blockchain.ConsensusResultMess,
 					Data: dr,
 				}
-				// Re-initialize encoder for the message AFTER ID exchange
-				// Note: The existing encoder on `conn` should be fine if the stream is continuous.
-				// Creating a new one might be safer if there are concerns about gob state.
-				// For simplicity, let's reuse. If issues, uncommenting the next line is a debug step.
-				// encoder = gob.NewEncoder(conn)
 
 				err = encoder.Encode(msgToSend)
 				if err != nil {
@@ -330,12 +316,11 @@ func (consensus *Committed) update(payload Blockchain.Payload) *Blockchain.Messa
 		consensus.BlockPool.RemoveBlock(block.Hash) // Clean up block pool if RAM optimization is on
 	}
 
-	consensus.updateState(FinalCommittedSt) // Transition to mark finalization of this block
-	consensus.updateStateAfterCommit()      // Determine the next actual working state (NewRound or NewRoundProposer)
-	return nil                               // No PBFT message is directly emitted from this state's update for progression
+	consensus.updateState(FinalCommittedSt)
+	consensus.updateStateAfterCommit()
+	return nil
 }
 
-// NewRoundNV represents the state for non-validator nodes in PoA mode.
 type NewRoundNV struct {
 	*PBFTStateConsensus
 }
@@ -385,7 +370,7 @@ func (consensus *NewRoundNV) update(payload Blockchain.Payload) *Blockchain.Mess
 	if consensus.RamOpt {
 		consensus.BlockPoolNV.RemoveBlock(block.Hash) // Clean up NV block pool
 	}
-	consensus.updateState(FinalCommittedSt)  // Mark finalization
-	consensus.updateStateAfterCommit()       // Determine next state (will remain NVRoundSt)
-	return nil                               // No message emitted for PBFT progression
+	consensus.updateState(FinalCommittedSt) // Mark finalization
+	consensus.updateStateAfterCommit()      // Determine next state (will remain NVRoundSt)
+	return nil                              // No message emitted for PBFT progression
 }

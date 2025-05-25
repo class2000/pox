@@ -13,6 +13,7 @@ import (
 	// gRPC imports
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure" // For insecure gRPC connections
+
 	// Consider adding keepalive if connection drops are suspected later
 	// "google.golang.org/grpc/keepalive"
 
@@ -20,30 +21,30 @@ import (
 	"github.com/rs/zerolog/log"
 
 	// Project-specific imports
+	pbftconsensus "pbftnode/proto" // Import generated protobuf Go code
 	"pbftnode/source/Blockchain"
 	"pbftnode/source/Blockchain/Consensus"
 	"pbftnode/source/Blockchain/Socket"
-	pbftconsensus "pbftnode/proto" // Import generated protobuf Go code
 )
 
 // NodeArg holds all arguments and configuration for launching a PBFT node.
 type NodeArg struct {
-	BaseArg         // Embeds common arguments (logging, interrupt channel)
-	BootAddr        string // Address of the bootstrap server (IP:Port)
-	NodeId          string // String identifier for this node (e.g., "0", "1")
-	NodeNumber      int    // Total expected number of nodes in the network
-	SaveFile        string // Path to save the blockchain state
-	MultiSaveFile   bool   // Whether to save the blockchain in multiple fragments
-	ListeningPort   string // Port for this node to listen for peer connections
-	HttpChain       string // Port to expose blockchain data via HTTP (optional)
-	HttpMetric      string // Port to expose metrics via HTTP (optional)
-	Param           Blockchain.ConsensusParam // Parameters passed to the consensus engine
-	PPRof           bool   // Enable Go's pprof HTTP server
-	Control         bool   // Enable Feedback Control Block (FCB)
-	Sleep           int    // Milliseconds to sleep before starting connections
-	RegularSave     int    // Interval (minutes) for periodic blockchain saving
-	DelayParam      DelayParam // Parameters for simulating network delay
-	RyuReplicaAddr  string // Address (IP:Port) of the Ryu Replica gRPC server
+	BaseArg
+	BootAddr       string
+	NodeId         string
+	NodeNumber     int
+	SaveFile       string
+	MultiSaveFile  bool
+	ListeningPort  string
+	HttpChain      string
+	HttpMetric     string
+	Param          Blockchain.ConsensusParam
+	PPRof          bool
+	Control        bool
+	Sleep          int
+	RegularSave    int
+	DelayParam     DelayParam
+	RyuReplicaAddr string
 }
 
 // DelayParam holds parameters for network delay simulation.
@@ -57,11 +58,11 @@ type DelayParam struct {
 
 // Node is the main function to start and run a PBFT node instance.
 func Node(arg NodeArg) {
-	var srv *http.Server // HTTP server instance (for chain/metric viewing)
+	var srv *http.Server                                  // HTTP server instance (for chain/metric viewing)
 	var replicaClient pbftconsensus.RyuReplicaLogicClient // gRPC client stub for Ryu Replica
-	var replicaConn *grpc.ClientConn                    // gRPC connection object
+	var replicaConn *grpc.ClientConn                      // gRPC connection object
 
-	arg.init() // Initialize base arguments (logging, signal handling)
+	arg.init()                  // Initialize base arguments (logging, signal handling)
 	var Saver *Blockchain.Saver // Blockchain saver instance
 	defLoggerPanic()            // Setup panic recovery logging
 	defer arg.close()           // Ensure base resources are closed on exit
@@ -94,53 +95,42 @@ func Node(arg NodeArg) {
 		log.Info().Msgf("Initiating non-blocking gRPC connection attempt to Ryu Replica at %s", arg.RyuReplicaAddr)
 		// Configure gRPC dial options
 		opts := []grpc.DialOption{
-			// Use insecure credentials (no TLS) for simplicity
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
-			// REMOVED: grpc.WithBlock(), // Don't block on initial Dial
-			// Consider adding keepalive parameters
-			// grpc.WithKeepaliveParams(keepalive.ClientParameters{...}),
 		}
 		// Dial without context timeout (or a very long one), connection happens in background
 		conn, err := grpc.Dial(arg.RyuReplicaAddr, opts...) // Use Dial instead of DialContext
 
 		if err != nil {
-			// This error is less likely now unless the address format is wrong
+
 			log.Error().Err(err).Msgf("Failed to initiate gRPC connection to Ryu Replica at %s. SDN validation will likely fail.", arg.RyuReplicaAddr)
 			replicaClient = nil
 			replicaConn = nil
 		} else {
-			// Dial returns immediately, connection happens in background.
+
 			log.Info().Msgf("gRPC connection initiated to Ryu Replica at %s (will connect lazily)", arg.RyuReplicaAddr)
-			replicaConn = conn // Store the connection object
-			// Create the client stub using the connection
+			replicaConn = conn
 			replicaClient = pbftconsensus.NewRyuReplicaLogicClient(conn)
-			// The actual connection test will happen on the first RPC call.
 		}
 	} else {
 		log.Warn().Msg("Ryu Replica address not provided. Node cannot participate in SDN control validation.")
 	}
-	// --- /Establish gRPC Connection ---
 
-	// Pass the (potentially nil) gRPC client to the consensus parameters
 	arg.Param.ReplicaClient = replicaClient
 
-	// Initialize the PBFT consensus engine
 	consensus := Consensus.NewPBFTStateConsensus(wallet, arg.NodeNumber, arg.Param)
 
-	// Initialize network delay simulation parameters
 	delay := Socket.NewNodeDelay(createDelay(arg.DelayParam, consensus.GetId()), true)
-	// Initialize network communication layer (connects to bootstrap and peers)
+
 	var comm = Socket.NewNetSocketBoot(consensus, arg.BootAddr, arg.ListeningPort, delay)
-	// Provide the network handler to the consensus engine
+
 	consensus.SetSocketHandler(comm)
-	// Initiate connections to peers discovered via bootstrap
+
 	comm.InitBootstrapedCo()
 
-	// Enable feedback control loop if requested
 	if arg.Control {
 		consensus.SetControlInstruction(true)
 	}
-	// Start HTTP metrics server if configured
+
 	if arg.HttpMetric != "" {
 		consensus.SetHTTPViewer(arg.HttpMetric)
 	}
@@ -311,25 +301,18 @@ func readFullMatrix(path string) [][]int {
 	return lineMatrix
 }
 
-// defLoggerPanic sets up a deferred function to recover from panics and log them.
 func defLoggerPanic() {
-	// This should ideally be called at the start of critical goroutines.
-	// Calling it once here provides some top-level protection.
+
 	defer func() {
 		if r := recover(); r != nil {
 			log.Panic().Msgf("Recovered from panic: %v", r)
-			// Consider adding stack trace: debug.PrintStack()
-			os.Exit(1) // Exit after logging panic to prevent undefined state
+			os.Exit(1)
 		}
 	}()
 }
 
-// check is a deprecated utility function for basic error checking.
-// Prefer explicit 'if err != nil' checks.
 func check(err error) {
 	if err != nil {
 		log.Error().Err(err).Msg("Check function caught an error (DEPRECATED)")
-		// Avoid panic in production code
-		// panic(err)
 	}
 }

@@ -17,10 +17,8 @@ import (
 
 const ChannelSize = 64
 
-// Keep the longer timeout for this test to ensure it's not just slowness
 const ReplicaTimeout = 20 * time.Second
 
-// PBFTStateConsensus implements the main PBFT consensus logic using a state machine approach.
 type PBFTStateConsensus struct {
 	CoreConsensus
 	state             consensusState
@@ -39,17 +37,14 @@ type PBFTStateConsensus struct {
 	knownDealerPubKey ed25519.PublicKey
 }
 
-// GetBlockchain provides access to the underlying blockchain object.
 func (consensus *PBFTStateConsensus) GetBlockchain() *Blockchain.Blockchain {
 	return consensus.BlockChain
 }
 
-// GetTransactionPool provides access to the transaction pool.
 func (consensus *PBFTStateConsensus) GetTransactionPool() Blockchain.TransactionPoolInterf {
 	return consensus.TransactionPool
 }
 
-// NewPBFTStateConsensus creates a new instance of the state-based PBFT consensus engine.
 func NewPBFTStateConsensus(wallet *Blockchain.Wallet, numberOfNode int, param Blockchain.ConsensusParam) *PBFTStateConsensus {
 	coreArgs := consensusArgs{
 		MetricSaveFile:   param.MetricSaveFile,
@@ -97,14 +92,12 @@ func NewPBFTStateConsensus(wallet *Blockchain.Wallet, numberOfNode int, param Bl
 	return consensus
 }
 
-// SetControlInstruction enables or disables the feedback control loop.
 func (consensus *PBFTStateConsensus) SetControlInstruction(instruct bool) {
 	if consensus.Control != nil {
 		consensus.Control.SetInstruction(instruct)
 	}
 }
 
-// updateState changes the current consensus state and logs the transition.
 func (consensus *PBFTStateConsensus) updateState(state consensusState) {
 	if consensus.state == state {
 		return
@@ -123,8 +116,6 @@ func (consensus *PBFTStateConsensus) updateState(state consensusState) {
 	}
 }
 
-// MessageHandler routes incoming messages to appropriate channels after basic sender validation.
-// Reverted to allow Dealer messages generally.
 func (consensus *PBFTStateConsensus) MessageHandler(message Blockchain.Message) {
 	if message.Data == nil {
 		log.Warn().Msg("Received message with nil Data field, dropping.")
@@ -132,7 +123,6 @@ func (consensus *PBFTStateConsensus) MessageHandler(message Blockchain.Message) 
 	}
 
 	senderPubKey := message.Data.GetProposer()
-	// senderKeyStr := base64.StdEncoding.EncodeToString(senderPubKey) // Moved inside log.Debug
 
 	isKnownValidator := consensus.Validators.IsValidator(senderPubKey)
 	isKnownDealer := bytes.Equal(senderPubKey, consensus.knownDealerPubKey)
@@ -142,11 +132,10 @@ func (consensus *PBFTStateConsensus) MessageHandler(message Blockchain.Message) 
 	if isKnownValidator {
 		allowMessage = true
 	} else if isKnownDealer {
-		// Allow messages from Dealer (specific validation happens in handlers)
+
 		log.Debug().Str("sender", base64.StdEncoding.EncodeToString(senderPubKey)).Str("type", message.Flag.String()).Msg("Allowing message from known Dealer")
 		allowMessage = true
 	} else if message.Flag == Blockchain.TransactionMess && consensus.acceptUnknownTx {
-		// Allow non-command transactions from unknown senders ONLY if acceptUnknownTx is true
 		if tx, ok := message.Data.(Blockchain.Transaction); ok && !tx.IsCommand() {
 			log.Debug().Str("sender", base64.StdEncoding.EncodeToString(senderPubKey)).Msg("Allowing transaction from unknown sender (acceptUnknownTx=true)")
 			allowMessage = true
@@ -163,7 +152,6 @@ func (consensus *PBFTStateConsensus) MessageHandler(message Blockchain.Message) 
 		return // Drop the message
 	}
 
-	// Route allowed messages to appropriate channels
 	if message.Priority {
 		select {
 		case consensus.chanPrioInMsg <- message:
@@ -249,11 +237,6 @@ func (consensus *PBFTStateConsensus) drainAndUpdateState(triggeringMessage Block
 	if triggeringMessage.Data != nil { // Ensure it's a valid message
 		consensus.updateStatusWithMsg(triggeringMessage)
 	}
-
-	// Then, drain any other signals that might have been queued up
-	// during the processing of the initial triggeringMessage.
-	// This helps ensure all cascaded state changes are handled before
-	// picking up new external messages.
 	for {
 		select {
 		case message, ok := <-consensus.chanUpdateStatus:
@@ -404,8 +387,6 @@ func (consensus *PBFTStateConsensus) updateStateFct() stateInterf {
 		return &Committed{consensus}
 	case RoundChangeSt:
 		log.Warn().Msg("RoundChangeSt state handler not implemented.")
-		// Fallback to NewRound? Or return a stub handler? For now, return nil is problematic.
-		// Let's return the NewRound handler as a fallback to keep processing messages.
 		return &NewRound{consensus}
 	case NVRoundSt:
 		return &NewRoundNV{consensus}
@@ -429,9 +410,6 @@ func (consensus *PBFTStateConsensus) receivedMessage(message Blockchain.Message)
 	// Standard message routing for actual PBFT messages
 	switch message.Flag {
 	case Blockchain.TransactionMess:
-		// Handled by transactionHandler goroutine via chanTxMsg
-		// This function receives from handleOneMsg, which got it from chanTxMsg
-		// So we call the processing logic directly here.
 		consensus.receiveTransacMess(message) // Process the message based on its type
 	case Blockchain.PrePrepare:
 		consensus.receivePrePrepareMessage(message) // Replica call logic is inside here
@@ -508,15 +486,6 @@ func (consensus *PBFTStateConsensus) ReceiveTrustedMess(message Blockchain.Messa
 	}
 	log.Debug().Str("txHash", transac.GetHashPayload()).Msg("ReceiveTrustedMess: TransactionPool.AddTransaction returned success.")
 
-	// Relay logic
-	// If the message came from the Dealer (ID -1) and we are the proposer,
-	// we should process it without re-broadcasting immediately back to nodes,
-	// but instead include it in the next block.
-	// If it came from another node (ID >= 0) asking for broadcast, we should broadcast.
-	// If it came from another node (ID >= 0) with DefaultBehaviour, we forward to proposer (if not us).
-
-	// Check sender ID - Note: Message struct doesn't carry original sender ID, only Proposer PubKey.
-	// We know the Dealer's PubKey. If the Proposer matches Dealer's PubKey, it came from Dealer.
 	senderPubKey := message.Data.GetProposer()
 	isFromDealer := bytes.Equal(senderPubKey, consensus.knownDealerPubKey)
 
@@ -540,8 +509,6 @@ func (consensus *PBFTStateConsensus) ReceiveTrustedMess(message Blockchain.Messa
 	}
 }
 
-// receivePrePrepareMessage handles incoming PrePrepare messages.
-// Includes the gRPC call to the replica for SDN transactions.
 func (consensus *PBFTStateConsensus) receivePrePrepareMessage(message Blockchain.Message) {
 	block, ok := message.Data.(Blockchain.Block)
 	if !ok {
@@ -551,11 +518,9 @@ func (consensus *PBFTStateConsensus) receivePrePrepareMessage(message Blockchain
 
 	log.Debug().Int("seqNb", block.SequenceNb).Str("hash", block.GetHashPayload()).Msg("Received PrePrepare in receivePrePrepareMessage.")
 
-	// --- Regular Validation ---
 	isValid := consensus.BlockChain.IsValidNewBlock(block)
 	isNew := !consensus.BlockPool.ExistingBlock(block)
 	log.Debug().Bool("isNew", isNew).Bool("isValid", isValid).Int("seqNb", block.SequenceNb).Msg("receivePrePrepareMessage: Checking PrePrepare basic validation.")
-	// --- /Regular Validation ---
 
 	if isNew && isValid {
 		log.Debug().Int("seqNb", block.SequenceNb).Msg("receivePrePrepareMessage: Basic validation passed (isNew && isValid). Starting SDN validation.")
@@ -569,9 +534,6 @@ func (consensus *PBFTStateConsensus) receivePrePrepareMessage(message Blockchain
 				if consensus.replicaClient != nil {
 					// --- Use Background context for testing ---
 					ctx := context.Background()
-					// ctx, cancel := context.WithTimeout(context.Background(), ReplicaTimeout)
-					// defer cancel()
-					// --- /Use Background context ---
 
 					req := &pbftconsensus.CalculateActionRequest{PacketInfo: sdnInput.PacketInfo}
 
@@ -607,10 +569,6 @@ func (consensus *PBFTStateConsensus) receivePrePrepareMessage(message Blockchain
 
 				} else {
 					log.Warn().Int("seqNb", block.SequenceNb).Str("txHash", tx.GetHashPayload()).Msg("receivePrePrepareMessage: Received SDN transaction but no replica client configured. Cannot validate.")
-					// How should this case be handled? Currently fails validation.
-					// If replicaClient is nil, the 'if consensus.replicaClient != nil' is false.
-					// The code currently *doesn't* set sdnValidationPassed = false here.
-					// It probably *should* if SDN validation is mandatory.
 					sdnValidationPassed = false // ADD THIS LINE if SDN validation is mandatory
 					break                       // Exit loop if validation is mandatory but impossible
 				}
@@ -841,13 +799,6 @@ func (consensus *PBFTStateConsensus) Close() {
 		close(consensus.toKill)
 		consensus.toKill = nil
 	}
-	// Close transaction handler channel? It's range-looping on chanTxMsg.
-	// The transactionHandler goroutine will exit when chanTxMsg is closed.
-	// chanTxMsg is read by transactionHandler. Who writes to chanTxMsg?
-	// messageHandler writes to chanTxMsg. messageHandler exits when toKill is closed.
-	// So, closing toKill *should* lead to messageHandler closing chanTxMsg.
-	// transactionHandler should then exit.
-	// No explicit close of chanTxMsg is needed here if the flow is correct.
 
 	log.Info().Int("nodeId", consensus.GetId()).Msg("PBFT State Consensus closed.")
 }
