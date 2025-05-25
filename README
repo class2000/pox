@@ -1,143 +1,171 @@
-# PBFT-Enhanced SDN Control Plane using POX and Go (Sabine Fork)
+# PBFT-Enhanced SDN Control Plane using POX and Go (Sabine Fork Adaptation)
 
-This project implements and evaluates a distributed Software-Defined Networking (SDN) control plane architecture that leverages Practical Byzantine Fault Tolerance (PBFT) to achieve consensus on network control decisions. It integrates a Go-based PBFT consensus network (an adapted fork of the Sabine project) with the Python-based POX SDN controller framework.
+This project implements and evaluates a distributed Software-Defined Networking (SDN) control plane. It uses a Practical Byzantine Fault Tolerance (PBFT) consensus mechanism, built in Go (as an adaptation of the Sabine project), to achieve agreement on network control decisions. This system is integrated with the Python-based POX SDN controller framework, where POX instances act as a primary controller and multiple deterministic replicas.
 
-The system is designed to ensure that critical SDN forwarding decisions (e.g., PacketOut actions in response to PacketIn events) are validated and agreed upon by a distributed set of components before being enacted on the network. This enhances consistency and resilience in distributed SDN environments.
+The core objective is to ensure that critical SDN forwarding decisions (e.g., PacketOut actions resulting from PacketIn events) are validated by a distributed set of replicas and agreed upon via PBFT consensus *before* these actions are applied to the network switches. This architecture aims to enhance consistency and resilience in distributed SDN environments.
 
-## Overview
+## Key Features & Overview
 
-The system comprises several key components:
-
-*   **Go PBFT System (Located in `Sabine_ODL_Fork/` directory):**
-    *   This is an adapted fork of the "Sabine" PBFT implementation, originally by Dr. Guilain Leduc ([https://github.com/inpprenable/Sabine](https://github.com/inpprenable/Sabine)). For this project, it has been modified for integration with the POX SDN control plane.
-    *   **PBFT Nodes (`Sabine_ODL_Fork/pbftnode node`):** Go applications forming the consensus network. They execute the PBFT protocol, validate proposed SDN actions by consulting POX Replicas via gRPC, and agree on the final actions.
-    *   **PBFT Dealer (`Sabine_ODL_Fork/pbftnode dealer`):** A Go application acting as a gateway. It receives SDN action proposals from the POX Primary via gRPC, wraps them into PBFT transactions, broadcasts these to PBFT nodes, and relays consensus results back to the POX Primary.
-    *   **PBFT Bootstrap (`Sabine_ODL_Fork/pbftnode bootstrap`):** A Go service for peer discovery among PBFT components.
-
-*   **POX SDN Controller System (Python, main POX directory and `ext/pbft_pox_app.py`):**
-    *   Utilizes the POX framework. The custom logic for this project resides primarily in `ext/pbft_pox_app.py`.
-    *   **POX Primary:** The main SDN controller instance (`pbft_pox_app.py` run in primary mode). It handles `PacketIn` events from switches, computes a proposed action using its L2 learning logic, and sends this to the PBFT Dealer via gRPC for consensus.
-    *   **POX Replicas:** Multiple instances of `pbft_pox_app.py` (run in replica mode). Each PBFT node communicates with a dedicated POX Replica via gRPC. Replicas independently compute deterministic SDN actions based on packet information to validate proposals.
-
-*   **Communication Protocols:**
-    *   **gRPC (with Protocol Buffers in `Sabine_ODL_Fork/proto/`):**
-        *   POX Primary $\leftrightarrow$ PBFT Dealer.
-        *   PBFT Node $\leftrightarrow$ POX Replica.
-    *   **Custom TCP + Gob Serialization:** For P2P communication within the Go PBFT network and for PBFT Nodes reporting consensus results to the Dealer.
-
-*   **Containerization (Docker & Docker Compose):** All components are containerized for consistent deployment and orchestration via the main `docker-compose.yml` file in this repository.
+*   **Consensus-Driven SDN Control:** SDN actions proposed by a POX Primary controller are not immediately executed. Instead, they are submitted as transactions to a Go-based PBFT network.
+*   **Externalized Deterministic Validation:** PBFT nodes, during the consensus process, query dedicated POX Replica instances via gRPC. These replicas independently compute the expected SDN action based on the packet information, providing a validation layer for the primary's proposal.
+*   **Go PBFT System (in `Sabine_ODL_Fork/`):**
+    *   Adapted from Dr. Guilain Leduc's "Sabine" project ([https://github.com/inpprenable/Sabine](https://github.com/inpprenable/Sabine)).
+    *   **PBFT Nodes (`pbftnode node`):** Execute the PBFT protocol.
+    *   **PBFT Dealer (`pbftnode dealer`):** Acts as a gRPC gateway for the POX Primary and relays consensus results.
+    *   **PBFT Bootstrap (`pbftnode bootstrap`):** Facilitates peer discovery.
+*   **POX SDN Controller System (in `ext/pbft_pox_app.py` and standard POX files):**
+    *   **POX Primary:** Manages switch connections, proposes SDN actions for consensus.
+    *   **POX Replicas:** Provide deterministic action computation for PBFT node validation.
+*   **Communication:**
+    *   gRPC (Protocol Buffers in `Sabine_ODL_Fork/proto/`) for POX $\leftrightarrow$ Go PBFT system interactions.
+    *   Custom TCP + Gob for intra-Go PBFT network P2P communication and result reporting.
+*   **Deployment:** Containerized using Docker and orchestrated with a dynamically generated `docker-compose.yml` file via `generate_docker_compose.py`.
+*   **Network Emulation:** Typically uses Mininet to connect virtual switches to the POX Primary.
 
 ## Architecture and Workflow
 
-1.  **PacketIn:** An OpenFlow switch sends a `PacketIn` message to the **POX Primary**.
-2.  **Proposed Action:** The POX Primary computes a proposed action.
-3.  **Consensus Request:** POX Primary sends a gRPC `ConsensusRequest` to the **PBFT Dealer**.
-4.  **Transaction Creation & Broadcast:** PBFT Dealer wraps this into a PBFT `Transaction` and broadcasts it to **PBFT Nodes**.
-5.  **PBFT Consensus - Pre-Prepare:** The PBFT primary node broadcasts a `PrePrepare` message.
-6.  **PBFT Consensus - Validation & Prepare:** PBFT validator nodes make gRPC `CalculateAction` calls to their dedicated **POX Replicas**. If validation passes, they broadcast `Prepare` messages.
-7.  **PBFT Consensus - Commit:** After sufficient `Prepare` messages, nodes broadcast `Commit` messages.
-8.  **Block Finalization & Result Reporting:** Upon sufficient `Commit` messages, nodes finalize the block. The committing node sends a `ConsensusResultMess` via TCP to the **PBFT Dealer's** income port.
-9.  **Response to Primary:** PBFT Dealer sends a gRPC `ConsensusResponse` back to the **POX Primary**.
-10. **Action Execution:** POX Primary executes the agreed-upon action on the switch.
+The typical flow for a `PacketIn` event is:
 
+1.  **PacketIn:** Switch sends `PacketIn` to **POX Primary**.
+2.  **Proposal:** POX Primary computes a proposed action (e.g., flood, packet_out).
+3.  **Consensus Request:** POX Primary sends a gRPC `ConsensusRequest` to **PBFT Dealer**.
+4.  **PBFT Transaction:** Dealer creates an SDN transaction and broadcasts it to **PBFT Nodes**.
+5.  **PBFT Round:**
+    *   The PBFT proposer initiates a Pre-Prepare.
+    *   Validator nodes receive Pre-Prepare, make gRPC calls to their **POX Replicas** for action validation.
+    *   If validation succeeds, nodes exchange Prepare and Commit messages.
+6.  **Block Commit & Result:** Nodes finalize the block. The committing node(s) send a `ConsensusResultMess` via TCP to the **PBFT Dealer's** income port (default 5000).
+7.  **Response to Primary:** Dealer sends a gRPC `ConsensusResponse` to **POX Primary**.
+8.  **Action Execution:** POX Primary sends the final OpenFlow command to the switch.
 
 ## Prerequisites
 
-*   **Git:** For version control.
-*   **Docker Engine:** To build and run containerized services.
-*   **Docker Compose:** (V2 or later recommended) To orchestrate multi-container Docker applications.
-*   **(Optional) Go Programming Language (e.g., 1.23+):** If you intend to modify and rebuild the Go PBFT components (`Sabine_ODL_Fork/`).
-*   **(Optional) Python 3:** If you intend to modify the POX controller application (`ext/pbft_pox_app.py`).
-*   **(Optional) Mininet:** For external network emulation if not relying solely on Docker networking for switches.
+*   **Git**
+*   **Docker Engine**
+*   **Docker Compose** (V2 or later recommended)
+*   **Python 3** (for `generate_docker_compose.py` and POX)
+*   **(Optional) Go (e.g., 1.23+):** If modifying `Sabine_ODL_Fork`.
+*   **(Optional) Mininet:** For running OpenFlow switches. The `pmanzoni/mininet-in-a-container` Docker image is recommended.
 
 ## Setup and Installation
 
-1.  **Clone This Repository:**
+1.  **Clone this Repository (which includes POX and your Sabine fork):**
     ```bash
     git clone https://github.com/class2000/pox.git
     cd pox
     ```
-    *(Assuming `class2000/pox` is the correct URL for your integrated project).*
 
-2.  **Generate gRPC Stubs (if not already present or if `.proto` files change):**
-    *   **Go Stubs:** Navigate to `Sabine_ODL_Fork/` and run the `protoc` commands to generate/update Go gRPC files from `proto/pbft_consensus.proto`. (You might want to include a `generate_protos.sh` script for this).
+2.  **Generate gRPC Stubs (One-time setup or if `Sabine_ODL_Fork/proto/pbft_consensus.proto` changes):**
+    The generated Python gRPC stubs (`pbft_consensus_pb2.py`, `pbft_consensus_pb2_grpc.py`) are expected by `ext/pbft_pox_app.py` and should be placed in the `ext/` directory. The Go stubs are used by the `Sabine_ODL_Fork` project.
+
+    *   **For Python Stubs (to be placed in `pox/ext/`):**
+        Navigate to the `Sabine_ODL_Fork/proto/` directory:
         ```bash
-        # Example for Go (run from Sabine_ODL_Fork/)
+        cd Sabine_ODL_Fork/proto/
+        # Ensure grpcio-tools is installed: pip install grpcio-tools
+        python -m grpc_tools.protoc -I. --python_out=../../ext --pyi_out=../../ext --grpc_python_out=../../ext pbft_consensus.proto
+        cd ../.. # Return to the main project (pox/) directory
+        ```
+    *   **For Go Stubs (within `Sabine_ODL_Fork/proto/`):**
+        Navigate to the `Sabine_ODL_Fork/proto/` directory:
+        ```bash
+        cd Sabine_ODL_Fork/proto/
         # Ensure protoc, protoc-gen-go, and protoc-gen-go-grpc are installed and in your PATH
-        # cd proto
-        # protoc --go_out=. --go_opt=paths=source_relative \
-        #        --go-grpc_out=. --go-grpc_opt=paths=source_relative \
-        #        pbft_consensus.proto
-        # cd ..
+        protoc --go_out=. --go_opt=paths=source_relative \
+               --go-grpc_out=. --go-grpc_opt=paths=source_relative \
+               pbft_consensus.proto
+        cd ../.. # Return to the main project (pox/) directory
         ```
-    *   **Python Stubs:** Navigate to the directory containing `pbft_consensus.proto` (likely `Sabine_ODL_Fork/proto/`) and run `protoc` to generate Python gRPC files. These (`pbft_consensus_pb2.py`, `pbft_consensus_pb2_grpc.py`) need to be placed where your `pbft_pox_app.py` can import them (e.g., in the `ext/` directory or a location added to `PYTHONPATH`).
-        ```bash
-        # Example for Python (run from Sabine_ODL_Fork/proto/, output to ../../ext/ or similar)
-        # Ensure protoc and grpcio-tools are installed
-        # python -m grpc_tools.protoc -I. --python_out=../../ext --pyi_out=../../ext --grpc_python_out=../../ext pbft_consensus.proto
-        ```
-    *(This step is crucial. If the generated files are already committed, users might not need to do this unless they modify the `.proto` file).*
-
-3.  **Build Docker Images:**
-    This is typically handled by `docker-compose up --build`, but you can build them individually if needed.
-    *   For Go components: `docker build -t your_pbft_image_name ./Sabine_ODL_Fork`
-    *   For POX component: `docker build -t your_pox_image_name .` (from the root of your `class2000/pox` repo, assuming the POX Dockerfile is there)
-    *(Your `docker-compose.yml` will use these image names or build contexts directly).*
+    *(If these generated files are already committed and up-to-date in your repository, users can skip this step).*
 
 ## Running the Simulation
 
-1.  **Start the Entire System:**
-    From the root directory of this repository (where `docker-compose.yml` is located):
+The following steps outline a typical experiment run:
+
+1.  **Generate Docker Compose Configuration:**
+    From the root of this repository (the `pox/` directory after cloning):
     ```bash
-    docker-compose up --build
+    python3 generate_docker_compose.py <number_of_pbft_nodes>
     ```
-    To run in detached mode:
+    For example, for 4 PBFT nodes (which means 1 POX Primary, 4 POX Replicas, 1 Dealer, 1 Bootstrap, and 4 PBFT Nodes):
     ```bash
-    docker-compose up --build -d
+    python3 generate_docker_compose.py 4
     ```
-    This will start all PBFT services, the POX Primary, and POX Replicas as defined in `docker-compose.yml`. The POX Primary will listen for OpenFlow connections on port 6633.
+    This creates `docker-compose.generated.yml`.
+    *(Note: Your `docker-compose.yml` provided in the prompt seems static for 4 nodes. If `generate_docker_compose.py` is used, ensure it outputs to `docker-compose.generated.yml` and the `docker-compose` commands below use that file. If your main `docker-compose.yml` is the one always used, adjust this step).*
 
-2.  **Connect Mininet Switches:**
-    *   Start a Mininet instance. You can run Mininet directly on your host or in another Docker container.
-    *   The POX Primary controller will be accessible at `pox-primary:6633` from within the Docker network `pbft_net`. If Mininet is external, you'll need to use the Docker host's IP and the mapped port 6633.
-    *   Example Mininet command (if Mininet is on the same Docker network or can resolve `pox-primary`):
-        ```bash
-        sudo mn --controller=remote,ip=pox-primary,port=6633 --switch=ovsk,protocols=OpenFlow10 --topo=single,2
-        ```
-        If Mininet is external to the Docker network:
-        ```bash
-        # Replace DOCKER_HOST_IP with the actual IP of your machine running Docker
-        sudo mn --controller=remote,ip=DOCKER_HOST_IP,port=6633 --switch=ovsk,protocols=OpenFlow10 --topo=single,2
-        ```
-## Testing and Evaluation
+2.  **Start PBFT/POX Services:**
+    Use the generated (or main) Docker Compose file:
+    ```bash
+    # If using a generated file:
+    docker compose -f docker-compose.generated.yml up --build -d
+    # If using the static docker-compose.yml from the prompt:
+    # docker compose -f docker-compose.yml up --build -d
+    ```
+    This will build images if necessary and start all services in detached mode. The POX Primary will listen on port 6633 (mapped to host).
 
-1.  **Basic Ping Test:**
-    Once the system is running and Mininet switches are connected to `pox-primary`:
-    *   Open the Mininet CLI: `mininet>`
-    *   Test connectivity: `h1 ping -c 3 h2`
-    *   Observe logs from all Docker containers (`docker-compose logs -f <service_name>` or `docker logs <container_id> -f`). You should see:
-        *   `pox-primary` logs for PacketIn, proposed actions, gRPC calls, and final executed actions.
-        *   `pbft-dealer` logs for received gRPC requests, transaction creation, and consensus result processing.
-        *   `pbft-node-*` logs detailing transaction reception, PBFT consensus phases (PrePrepare, Prepare, Commit), gRPC calls to Replicas, and result reporting to the Dealer.
-        *   `pox-replica-*` logs showing received `CalculateAction` requests and their computed responses.
+3.  **Run Mininet Container:**
+    Open a new terminal for Mininet. The following command runs Mininet in a container using the host's network, which simplifies connecting to the POX controller.
+    ```bash
+    docker run -it --rm --privileged --network=host \
+      -e DISPLAY \
+      -v /tmp/.X11-unix:/tmp/.X11-unix \
+      -v /lib/modules:/lib/modules \
+      --name mininet pmanzoni/mininet-in-a-container:amd64
+    ```
+    *For ARM64 (e.g., Mac M-series), XQuartz setup might be needed for GUI, or run headless.*
 
-2.  **Automated Experiments:**
-    *   The `expSH/` directory contains scripts that can be used or adapted for more systematic testing (e.g., varying the number of nodes, injecting specific transaction loads).
-    *   The `pbftnode zombie` commands can be used to simulate client behavior for throughput and latency tests.
+4.  **Start Mininet Topology and Connect to POX Primary:**
+    Inside the Mininet container's shell:
+    ```bash
+    mn --controller=remote,ip=127.0.0.1,port=6633 --switch=ovsk,protocols=OpenFlow10 --topo=single,2
+    ```
+    This creates a topology with one switch (s1) and two hosts (h1, h2), connecting to the POX controller running on the host machine (accessible via 127.0.0.1 due to `--network=host`).
 
-3.  **Analyzing Results:**
-    *   Use the Python scripts (like the one developed for parsing `pox_primary.txt`) to extract latency metrics (`L_consensus_delegation`).
-    *   Analyze PBFT node metrics exposed via HTTP (if configured with `--httpMetric`) or from saved metric files (`--metricSaveFile`) for PBFT transaction throughput.
-    *   Examine saved blockchain files (`--chainfile`) for consistency.
+5.  **Perform Tests:**
+    Inside the Mininet CLI (`mininet>`):
+    ```bash
+    # Example: Send 100 ICMP Echo Requests from h1 to h2, with a 10-second interval between each ping.
+    # This test will take approximately 1000 seconds (over 16 minutes) to complete.
+    h1 ping -i 10 -c 100 h2
+    ```
+    While the test is running, you can monitor the logs of the Docker containers:
+    ```bash
+    docker-compose -f docker-compose.generated.yml logs -f pox-primary pbft-dealer pbft-node-0 # and other nodes
+    # Or if using the static docker-compose.yml:
+    # docker-compose logs -f pox-primary pbft-dealer pbft-node-0
+    ```
+
+6.  **Analyze Results:**
+    *   Ping RTTs will be displayed by the `ping` command in Mininet.
+    *   Controller-side latencies (e.g., "Dealer Response Latency") can be extracted from `pox-primary` logs using a parser script (see `test_runs/pox_primary_log_parser.py` for an example).
+    *   PBFT transaction throughput can be obtained from the Go nodes' metrics endpoints or saved files if configured.
+
+7.  **Stopping the Simulation:**
+    To stop and remove the PBFT/POX services:
+    ```bash
+    # If using a generated file:
+    docker compose -f docker-compose.generated.yml down
+    # If using the static docker-compose.yml:
+    # docker compose down
+    ```
+    To exit Mininet, type `exit` in its CLI. The Mininet container will be removed automatically due to `--rm`.
 
 ## Current Status & Future Work
 
-*   **Working:** The core end-to-end flow for SDN control decisions via PBFT consensus, including externalized deterministic validation by POX Replicas, is functional. Proposer rotation is implemented.
-*   **Areas for Improvement/Future Work (as per `source/TODO.md` and analysis):**
-    *   **Full PBFT View Change Protocol:** Implement robust handling of faulty PBFT primary (proposer) nodes, including timeout detection for PrePrepares and the complete logic for `RoundChangeSt` to process `VIEW-CHANGE` and `NEW-VIEW` messages.
-    *   **Strict Mismatch Handling:** Currently, a mismatch between the POX Primary's proposed action and a POX Replica's computed action only logs a warning in the PBFT nodes. For stronger security, this could be configured to cause the PBFT node to reject the PrePrepare.
-    *   **Configuration:** Make more parameters (like the Dealer's result reporting address for nodes) configurable via flags or environment variables.
-    *   **Advanced Fault Injection & Resilience Testing:** Systematically test behavior under various fault conditions (Byzantine replicas, node crashes during consensus).
-    *   **Performance Optimization:** Investigate and implement optimizations based on detailed performance profiling.
-    *   **Security Hardening:** Implement TLS/SSL for gRPC and P2P channels, and add authentication/authorization layers.
-    *   **Broader State Synchronization:** Extend the consensus mechanism to cover general SDN state (e.g., topology, global policies) beyond just individual packet forwarding decisions.
+*   **Core Functionality:** The system successfully demonstrates end-to-end consensus on SDN PacketOut actions. PBFT nodes correctly validate proposals against deterministic POX Replicas. Proposer rotation is functional.
+*   **Performance Baseline:** Initial latency tests (e.g., "Dealer Response Latency" around 15-25ms for 4 nodes) indicate efficient core operations.
+*   **Areas for Development:**
+    *   **Full PBFT View Change Protocol:** To robustly handle faulty PBFT primary nodes.
+    *   **Strict Mismatch Handling:** Option for PBFT nodes to reject PrePrepares if POX Replica validation fails (currently only warns).
+    *   **Enhanced Configuration:** Externalize more parameters (e.g., Dealer's result port).
+    *   **Comprehensive Resilience Testing:** Systematic fault injection (Byzantine replicas, node crashes).
+    *   **Further Performance Profiling and Optimization.**
+    *   **Security Hardening (TLS, AuthN/AuthZ).**
+
+## Code Origins and Acknowledgements
+
+The Go-based PBFT consensus system (bootstrap, dealer, and node components, located in the `Sabine_ODL_Fork/` directory) is a fork and adaptation of the "Sabine" project, originally developed by Dr. Guilain Leduc.
+*   Original Sabine Repository: [https://github.com/inpprenable/Sabine](https://github.com/inpprenable/Sabine)
+
+This codebase was adapted to integrate with the POX SDN controller and to explore consensus in the context of SDN control plane decisions.
