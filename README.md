@@ -192,7 +192,11 @@ The following steps outline a typical experiment run:
 
 ## Code Origins and Acknowledgements
 
-The Go-based PBFT consensus system (bootstrap, dealer, and node components, located in the `Sabine_ODL_Fork/` directory) is a fork and adaptation of the "Sabine" project, originally developed by Dr. Guilain Leduc.
-*   Original Sabine Repository: [https://github.com/inpprenable/Sabine](https://github.com/inpprenable/Sabine)
+The Go-based PBFT consensus system (bootstrap, dealer, and node components, located in the `Sabine_ODL_Fork/` directory) is a fork and adaptation of the "Sabine" project, originally developed by Dr. Guilain Leduc.  
+- **Original Sabine Repository:** [https://github.com/inpprenable/Sabine](https://github.com/inpprenable/Sabine)
 
 This codebase was adapted to integrate with the POX SDN controller and to explore consensus in the context of SDN control plane decisions, particularly by enabling PBFT nodes to consult external POX Replicas for deterministic action validation.
+
+A valuable resource used during development for containerizing and running Mininet—especially helpful on macOS (both Intel and ARM) to avoid using heavy VMs—is:  
+- **Mininet-in-a-Container by Paolo Manzoni:** [https://github.com/pmanzoni/mininet-in-a-container](https://github.com/pmanzoni/mininet-in-a-container)
+
