@@ -55,29 +55,6 @@ The typical flow for a `PacketIn` event is:
     cd pox
     ```
 
-2.  **Generate gRPC Stubs (One-time setup or if `Sabine_ODL_Fork/proto/pbft_consensus.proto` changes):**
-    The generated Python gRPC stubs (`pbft_consensus_pb2.py`, `pbft_consensus_pb2_grpc.py`) are expected by `ext/pbft_pox_app.py` and should be placed in the `ext/` directory. The Go stubs are used by the `Sabine_ODL_Fork` project.
-
-    *   **For Python Stubs (to be placed in `pox/ext/`):**
-        Navigate to the `Sabine_ODL_Fork/proto/` directory:
-        ```bash
-        cd Sabine_ODL_Fork/proto/
-        # Ensure grpcio-tools is installed: pip install grpcio-tools
-        python -m grpc_tools.protoc -I. --python_out=../../ext --pyi_out=../../ext --grpc_python_out=../../ext pbft_consensus.proto
-        cd ../.. # Return to the main project (pox/) directory
-        ```
-    *   **For Go Stubs (within `Sabine_ODL_Fork/proto/`):**
-        Navigate to the `Sabine_ODL_Fork/proto/` directory:
-        ```bash
-        cd Sabine_ODL_Fork/proto/
-        # Ensure protoc, protoc-gen-go, and protoc-gen-go-grpc are installed and in your PATH
-        protoc --go_out=. --go_opt=paths=source_relative \
-               --go-grpc_out=. --go-grpc_opt=paths=source_relative \
-               pbft_consensus.proto
-        cd ../.. # Return to the main project (pox/) directory
-        ```
-    *(If these generated files are already committed and up-to-date in your repository, users can skip this step).*
-
 ## Running the Simulation
 
 The following steps outline a typical experiment run:
@@ -92,16 +69,14 @@ The following steps outline a typical experiment run:
     python3 generate_docker_compose.py 4
     ```
     This creates `docker-compose.generated.yml`.
-    *(Note: Your `docker-compose.yml` provided in the prompt seems static for 4 nodes. If `generate_docker_compose.py` is used, ensure it outputs to `docker-compose.generated.yml` and the `docker-compose` commands below use that file. If your main `docker-compose.yml` is the one always used, adjust this step).*
+
 
 2.  **Start PBFT/POX Services:**
     Use the generated (or main) Docker Compose file:
     ```bash
-    # If using a generated file:
     docker compose -f docker-compose.generated.yml up --build -d
-    # If using the static docker-compose.yml from the prompt:
-    # docker compose -f docker-compose.yml up --build -d
     ```
+
     This will build images if necessary and start all services in detached mode. The POX Primary will listen on port 6633 (mapped to host).
 
 3.  **Run Mininet Container:**
