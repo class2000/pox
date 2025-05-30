@@ -22,29 +22,35 @@ _runtime_version.ValidateProtobufRuntimeVersion(
 _sym_db = _symbol_database.Default()
 
 
+from google.protobuf import empty_pb2 as google_dot_protobuf_dot_empty__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x14pbft_consensus.proto\x12\rpbftconsensus\"_\n\nPacketInfo\x12\x0c\n\x04\x64pid\x18\x01 \x01(\t\x12\x0f\n\x07in_port\x18\x02 \x01(\r\x12\x11\n\tbuffer_id\x18\x03 \x01(\r\x12\x11\n\ttotal_len\x18\x04 \x01(\r\x12\x0c\n\x04\x64\x61ta\x18\x05 \x01(\x0c\"\x1d\n\x06\x41\x63tion\x12\x13\n\x0b\x61\x63tion_json\x18\x01 \x01(\t\"r\n\x10\x43onsensusRequest\x12.\n\x0bpacket_info\x18\x01 \x01(\x0b\x32\x19.pbftconsensus.PacketInfo\x12.\n\x0fproposed_action\x18\x02 \x01(\x0b\x32\x15.pbftconsensus.Action\"s\n\x11\x43onsensusResponse\x12+\n\x0c\x66inal_action\x18\x01 \x01(\x0b\x32\x15.pbftconsensus.Action\x12\x19\n\x11\x63onsensus_reached\x18\x02 \x01(\x08\x12\x16\n\x0estatus_message\x18\x03 \x01(\t\"H\n\x16\x43\x61lculateActionRequest\x12.\n\x0bpacket_info\x18\x01 \x01(\x0b\x32\x19.pbftconsensus.PacketInfo\"I\n\x17\x43\x61lculateActionResponse\x12.\n\x0f\x63omputed_action\x18\x01 \x01(\x0b\x32\x15.pbftconsensus.Action2f\n\rPBFTConsensus\x12U\n\x10RequestConsensus\x12\x1f.pbftconsensus.ConsensusRequest\x1a .pbftconsensus.ConsensusResponse2s\n\x0fRyuReplicaLogic\x12`\n\x0f\x43\x61lculateAction\x12%.pbftconsensus.CalculateActionRequest\x1a&.pbftconsensus.CalculateActionResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x14pbft_consensus.proto\x12\rpbftconsensus\x1a\x1bgoogle/protobuf/empty.proto\"_\n\nPacketInfo\x12\x0c\n\x04\x64pid\x18\x01 \x01(\t\x12\x0f\n\x07in_port\x18\x02 \x01(\r\x12\x11\n\tbuffer_id\x18\x03 \x01(\r\x12\x11\n\ttotal_len\x18\x04 \x01(\r\x12\x0c\n\x04\x64\x61ta\x18\x05 \x01(\x0c\"\x1d\n\x06\x41\x63tion\x12\x13\n\x0b\x61\x63tion_json\x18\x01 \x01(\t\"r\n\x10\x43onsensusRequest\x12.\n\x0bpacket_info\x18\x01 \x01(\x0b\x32\x19.pbftconsensus.PacketInfo\x12.\n\x0fproposed_action\x18\x02 \x01(\x0b\x32\x15.pbftconsensus.Action\"s\n\x11\x43onsensusResponse\x12+\n\x0c\x66inal_action\x18\x01 \x01(\x0b\x32\x15.pbftconsensus.Action\x12\x19\n\x11\x63onsensus_reached\x18\x02 \x01(\x08\x12\x16\n\x0estatus_message\x18\x03 \x01(\t\"\xe1\x01\n\rLinkEventInfo\x12\r\n\x05\x64pid1\x18\x01 \x01(\t\x12\r\n\x05port1\x18\x02 \x01(\r\x12\r\n\x05\x64pid2\x18\x03 \x01(\t\x12\r\n\x05port2\x18\x04 \x01(\r\x12\x37\n\x06status\x18\x05 \x01(\x0e\x32\'.pbftconsensus.LinkEventInfo.LinkStatus\x12\x14\n\x0ctimestamp_ns\x18\x06 \x01(\x03\"E\n\nLinkStatus\x12\x1b\n\x17LINK_STATUS_UNSPECIFIED\x10\x00\x12\x0b\n\x07LINK_UP\x10\x01\x12\r\n\tLINK_DOWN\x10\x02\"H\n\x16\x43\x61lculateActionRequest\x12.\n\x0bpacket_info\x18\x01 \x01(\x0b\x32\x19.pbftconsensus.PacketInfo\"I\n\x17\x43\x61lculateActionResponse\x12.\n\x0f\x63omputed_action\x18\x01 \x01(\x0b\x32\x15.pbftconsensus.Action2\xaf\x01\n\rPBFTConsensus\x12U\n\x10RequestConsensus\x12\x1f.pbftconsensus.ConsensusRequest\x1a .pbftconsensus.ConsensusResponse\x12G\n\x0fReportLinkEvent\x12\x1c.pbftconsensus.LinkEventInfo\x1a\x16.google.protobuf.Empty2\xbc\x01\n\x0fRyuReplicaLogic\x12`\n\x0f\x43\x61lculateAction\x12%.pbftconsensus.CalculateActionRequest\x1a&.pbftconsensus.CalculateActionResponse\x12G\n\x0fNotifyLinkEvent\x12\x1c.pbftconsensus.LinkEventInfo\x1a\x16.google.protobuf.EmptyB\x1eZ\x1cryu_pbft/proto;pbftconsensusb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'pbft_consensus_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
-  DESCRIPTOR._loaded_options = None
-  _globals['_PACKETINFO']._serialized_start=39
-  _globals['_PACKETINFO']._serialized_end=134
-  _globals['_ACTION']._serialized_start=136
-  _globals['_ACTION']._serialized_end=165
-  _globals['_CONSENSUSREQUEST']._serialized_start=167
-  _globals['_CONSENSUSREQUEST']._serialized_end=281
-  _globals['_CONSENSUSRESPONSE']._serialized_start=283
-  _globals['_CONSENSUSRESPONSE']._serialized_end=398
-  _globals['_CALCULATEACTIONREQUEST']._serialized_start=400
-  _globals['_CALCULATEACTIONREQUEST']._serialized_end=472
-  _globals['_CALCULATEACTIONRESPONSE']._serialized_start=474
-  _globals['_CALCULATEACTIONRESPONSE']._serialized_end=547
-  _globals['_PBFTCONSENSUS']._serialized_start=549
-  _globals['_PBFTCONSENSUS']._serialized_end=651
-  _globals['_RYUREPLICALOGIC']._serialized_start=653
-  _globals['_RYUREPLICALOGIC']._serialized_end=768
+  _globals['DESCRIPTOR']._loaded_options = None
+  _globals['DESCRIPTOR']._serialized_options = b'Z\034ryu_pbft/proto;pbftconsensus'
+  _globals['_PACKETINFO']._serialized_start=68
+  _globals['_PACKETINFO']._serialized_end=163
+  _globals['_ACTION']._serialized_start=165
+  _globals['_ACTION']._serialized_end=194
+  _globals['_CONSENSUSREQUEST']._serialized_start=196
+  _globals['_CONSENSUSREQUEST']._serialized_end=310
+  _globals['_CONSENSUSRESPONSE']._serialized_start=312
+  _globals['_CONSENSUSRESPONSE']._serialized_end=427
+  _globals['_LINKEVENTINFO']._serialized_start=430
+  _globals['_LINKEVENTINFO']._serialized_end=655
+  _globals['_LINKEVENTINFO_LINKSTATUS']._serialized_start=586
+  _globals['_LINKEVENTINFO_LINKSTATUS']._serialized_end=655
+  _globals['_CALCULATEACTIONREQUEST']._serialized_start=657
+  _globals['_CALCULATEACTIONREQUEST']._serialized_end=729
+  _globals['_CALCULATEACTIONRESPONSE']._serialized_start=731
+  _globals['_CALCULATEACTIONRESPONSE']._serialized_end=804
+  _globals['_PBFTCONSENSUS']._serialized_start=807
+  _globals['_PBFTCONSENSUS']._serialized_end=982
+  _globals['_RYUREPLICALOGIC']._serialized_start=985
+  _globals['_RYUREPLICALOGIC']._serialized_end=1173
 # @@protoc_insertion_point(module_scope)

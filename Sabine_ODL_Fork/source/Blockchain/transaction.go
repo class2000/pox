@@ -12,8 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 
-	// Import the generated protobuf package (adjust path as necessary based on your Go module structure)
-	pbftconsensus "pbftnode/proto"
+	pbftconsensus "pbftnode/proto" // Your generated protobuf package
 )
 
 // Input defines the interface for different types of transaction data.
@@ -50,23 +49,21 @@ type Transaction struct {
 // NewTransaction creates a new signed transaction.
 func NewTransaction(in Input, wallet Wallet) (transac *Transaction) {
 	transacCore := transactCore{
-		Ids:       Ids(),                 // Generate a new UUID
-		From:      wallet.PublicKey(),    // Set sender's public key
-		Input:     in,                    // Set the specific input payload
-		Timestamp: time.Now().UnixNano(), // Record creation time
+		Ids:       Ids(),
+		From:      wallet.PublicKey(),
+		Input:     in,
+		Timestamp: time.Now().UnixNano(),
 	}
-	// Serialize the core transaction data to get bytes for hashing
-	inputByte, err := json.Marshal(transacCore) // Use Marshal directly on transacCore
+	inputByte, err := json.Marshal(transacCore)
 	if err != nil {
-		// Handle potential marshaling error, though unlikely for this structure
-		log.Fatal().Err(err).Msg("Failed to marshal transactCore") // Consider returning error instead of Fatal
+		log.Fatal().Err(err).Msg("Failed to marshal transactCore")
 		return nil
 	}
 
-	hash := Hash(inputByte) // Hash the serialized core data
+	hash := Hash(inputByte)
 	transac = &Transaction{
 		Hash:       hash,
-		Signature:  wallet.Sign(hash), // Sign the hash
+		Signature:  wallet.Sign(hash),
 		TransaCore: transacCore,
 	}
 	return
@@ -79,7 +76,6 @@ func NewBruteTransaction(data []byte, wallet Wallet) *Transaction {
 
 // VerifyTransaction checks if the transaction's signature is valid for its content and sender.
 func (transaction Transaction) VerifyTransaction() bool {
-	// Recalculate the hash based on the TransaCore data
 	hashedDataBytes, err := json.Marshal(transaction.TransaCore)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to marshal transactCore for verification")
@@ -87,18 +83,14 @@ func (transaction Transaction) VerifyTransaction() bool {
 	}
 	expectedHash := Hash(hashedDataBytes)
 
-	// 1. Verify the stored hash matches the recalculated hash
 	if !bytes.Equal(transaction.Hash, expectedHash) {
 		log.Warn().Str("storedHash", base64.StdEncoding.EncodeToString(transaction.Hash)).Str("calculatedHash", base64.StdEncoding.EncodeToString(expectedHash)).Msg("Transaction hash mismatch")
 		return false
 	}
-
-	// 2. Verify the signature against the stored hash and the public key
 	return VerifySignature(transaction.TransaCore.From, transaction.Hash, transaction.Signature)
 }
 
 // ToByte serializes the transactCore struct to JSON bytes.
-// This is used for hashing the core content of the transaction.
 func (transacCore transactCore) ToByte() []byte {
 	byted, err := json.Marshal(transacCore)
 	if err != nil {
@@ -109,7 +101,6 @@ func (transacCore transactCore) ToByte() []byte {
 }
 
 // ToByte serializes the entire Transaction struct to JSON bytes.
-// This is used when the whole transaction (including hash and signature) needs to be serialized.
 func (transaction Transaction) ToByte() []byte {
 	byted, err := json.Marshal(transaction)
 	if err != nil {
@@ -123,15 +114,15 @@ func (transaction Transaction) ToByte() []byte {
 type CommandeType int8
 
 const (
-	VarieValid  CommandeType = iota // Command to change the active validator set
-	ChangeDelay                     // Command to change simulated network delay
+	VarieValid CommandeType = iota
+	ChangeDelay
 )
 
 // Commande represents a system command embedded in a transaction.
 type Commande struct {
-	Order           CommandeType        `json:"order"`           // The type of command
-	Variation       int                 `json:"variation"`       // Parameter for the command (e.g., new size or delay value)
-	NewValidatorSet []ed25519.PublicKey `json:"newValidatorSet"` // The proposed new set of validators (for VarieValid)
+	Order           CommandeType        `json:"order"`
+	Variation       int                 `json:"variation"`
+	NewValidatorSet []ed25519.PublicKey `json:"newValidatorSet"`
 }
 
 // inputToByte serializes Commande using JSON.
@@ -145,43 +136,35 @@ func (transaction Transaction) IsCommand() bool {
 	return ok
 }
 
-// verifyAsCommand checks the validity of a command transaction.
-// It ensures the sender is an active validator and the command parameters are valid.
 func (transac Transaction) verifyAsCommand(validators ValidatorInterf) (bool, error) {
 	commande, ok := transac.TransaCore.Input.(Commande)
 	if !ok {
 		return false, errors.New("transaction input is not a Commande")
 	}
-	// Check if the sender is currently an active validator
 	if !validators.IsActiveValidator(transac.TransaCore.From) {
-		if !validators.IsValidator(transac.TransaCore.From) { // Check if known at all
+		if !validators.IsValidator(transac.TransaCore.From) {
 			return false, errors.New("command sender is not a known validator")
 		}
 		return false, errors.New("command sender is not an active validator")
 	}
-	// Validate based on the specific command type
 	switch commande.Order {
 	case VarieValid:
-		// Check if the proposed validators are known nodes in the system
 		if !validators.CheckIfValidatorsAreNodes(commande.NewValidatorSet) {
 			return false, fmt.Errorf("VarieValid command: new proposed validator list contains unknown nodes")
 		}
-		// Check if the proposed size is within acceptable limits
 		if !validators.IsSizeValid(len(commande.NewValidatorSet)) {
 			return false, fmt.Errorf("VarieValid command: proposed validator set size %d is invalid", len(commande.NewValidatorSet))
 		}
 	case ChangeDelay:
-		// Ensure delay variation is not negative (or apply other relevant checks)
 		if commande.Variation < 0 {
 			return false, errors.New("ChangeDelay command: negative delay variation is not allowed")
 		}
 	default:
 		return false, fmt.Errorf("unknown command order type: %d", commande.Order)
 	}
-	return true, nil // Command is valid
+	return true, nil
 }
 
-// VerifyAsCommandShort provides a boolean check for command validity, logging any errors.
 func (transac Transaction) VerifyAsCommandShort(validators ValidatorInterf) bool {
 	ok, err := transac.verifyAsCommand(validators)
 	if err != nil {
@@ -191,33 +174,41 @@ func (transac Transaction) VerifyAsCommandShort(validators ValidatorInterf) bool
 }
 
 // --- SDN Control Input ---
-
-// SdnControlInput represents the data payload for transactions originating from the SDN control plane (Ryu Primary via Dealer).
 type SdnControlInput struct {
 	PacketInfo         *pbftconsensus.PacketInfo `json:"packet_info"`
-	ProposedActionJson string                    `json:"proposed_action_json"` // The action proposed by the primary Ryu instance
+	ProposedActionJson string                    `json:"proposed_action_json"`
 }
 
-// inputToByte serializes SdnControlInput using JSON.
 func (in SdnControlInput) inputToByte() ([]byte, error) {
 	return json.Marshal(in)
 }
 
-// --- /SDN Control Input ---
+// --- Link Event Input ---
+// LinkEventInput represents a link status change reported by the SDN primary.
+type LinkEventInput struct {
+	Dpid1       string `json:"dpid1"`
+	Port1       uint32 `json:"port1"`
+	Dpid2       string `json:"dpid2"`
+	Port2       uint32 `json:"port2"`
+	Status      string `json:"status"`       // "LINK_UP" or "LINK_DOWN" (matches enum names in proto)
+	TimestampNs int64  `json:"timestamp_ns"` // Nanosecond timestamp from primary
+}
 
-// GetHashPayload returns the transaction hash as a base64 encoded string.
+// inputToByte serializes LinkEventInput using JSON.
+func (in LinkEventInput) inputToByte() ([]byte, error) {
+	return json.Marshal(in)
+}
+
+// --- /Link Event Input ---
+
 func (transaction Transaction) GetHashPayload() string {
 	return base64.StdEncoding.EncodeToString(transaction.Hash)
 }
 
-// GetProposer returns the public key of the transaction's sender.
 func (transac Transaction) GetProposer() ed25519.PublicKey {
 	return transac.TransaCore.From
 }
 
-// --- Consensus Result ---
-
-// ConsensusResult carries the outcome of PBFT consensus for a specific transaction back to the Dealer.
 type ConsensusResult struct {
 	TxHash        []byte                `json:"tx_hash"`
 	Success       bool                  `json:"success"`

@@ -4,6 +4,8 @@ option go_package = "ryu_pbft/proto;pbftconsensus";
 
 package pbftconsensus;
 
+import "google/protobuf/empty.proto"; // Import for Empty message
+
 // Represents the core information from an OpenFlow PacketIn message
 message PacketInfo {
     string dpid = 1;         // Datapath ID as string
@@ -35,42 +37,63 @@ message Action {
 
 // === Service for PBFT Dealer interaction (used by Ryu Primary) ===
 
-// Request sent from Ryu Primary to PBFT Dealer
+// Request sent from Ryu Primary to PBFT Dealer for packet processing consensus
 message ConsensusRequest {
     PacketInfo packet_info = 1;
-    Action proposed_action = 2; // The action computed by the Primary
+    Action proposed_action = 2; // The action computed by the Primary for a packet
 }
 
-// Response sent from PBFT Dealer to Ryu Primary
+// Response sent from PBFT Dealer to Ryu Primary for packet processing consensus
 message ConsensusResponse {
     Action final_action = 1; // The consensus-agreed action
     bool consensus_reached = 2; // Indicates if consensus was successful
     string status_message = 3; // e.g., "Consensus OK" or "Discrepancy Detected"
 }
 
+// Message for link event information
+message LinkEventInfo {
+  string dpid1 = 1;
+  uint32 port1 = 2;
+  string dpid2 = 3;
+  uint32 port2 = 4;
+  enum LinkStatus {
+    LINK_STATUS_UNSPECIFIED = 0; // Default, should not be used explicitly by sender
+    LINK_UP = 1;
+    LINK_DOWN = 2;
+  }
+  LinkStatus status = 5;
+  int64 timestamp_ns = 6; // Optional: Nanosecond timestamp of when the event was detected by primary
+}
+
 // The service definition for the PBFT Dealer
 service PBFTConsensus {
-    // Ryu Primary calls this to initiate consensus
+    // Ryu Primary calls this to initiate consensus on an SDN action for a packet
     rpc RequestConsensus(ConsensusRequest) returns (ConsensusResponse);
+
+    // Ryu Primary calls this to report a link event to be disseminated via PBFT
+    rpc ReportLinkEvent(LinkEventInfo) returns (google.protobuf.Empty);
 }
 
 
 // === Service for Ryu Replica interaction (used by PBFT Nodes) ===
 
-// Request sent from PBFT Node to Ryu Replica
+// Request sent from PBFT Node to Ryu Replica to calculate an action for a packet
 message CalculateActionRequest {
     PacketInfo packet_info = 1;
     // Could include TxID for logging/correlation if needed
     // string tx_id = 2;
 }
 
-// Response sent from Ryu Replica to PBFT Node
+// Response sent from Ryu Replica to PBFT Node with the computed action for a packet
 message CalculateActionResponse {
     Action computed_action = 1;
 }
 
 // The service definition for the Ryu Replicas
 service RyuReplicaLogic {
-    // PBFT Node calls this to get deterministic action from a replica
+    // PBFT Node calls this to get deterministic action from a replica for a packet
     rpc CalculateAction(CalculateActionRequest) returns (CalculateActionResponse);
+
+    // PBFT Node calls this to notify the replica of a consensus-agreed link event
+    rpc NotifyLinkEvent(LinkEventInfo) returns (google.protobuf.Empty);
 }

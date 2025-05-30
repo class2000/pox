@@ -5,22 +5,24 @@ import json
 import time
 from concurrent import futures
 import threading
-import sys
-import logging
+import sys # Not strictly needed by this version, but often useful
+import logging # Standard Python logging, POX uses its own wrapper mostly
 
 # Third-party imports
 import grpc
 
-# --- Your generated gRPC files (ensure they are in pox/ext/) ---
+# --- Your generated gRPC files (ensure they are in pox/ext/ or your PYTHONPATH) ---
 import pbft_consensus_pb2
 import pbft_consensus_pb2_grpc
+from google.protobuf import empty_pb2 # For google.protobuf.Empty
 
 # Import POX core and OpenFlow stuff
 from pox.core import core
 import pox.openflow.libopenflow_01 as of
 from pox.lib.packet import ethernet
-from pox.lib.packet import arp
+from pox.lib.packet import arp 
 from pox.lib.util import dpid_to_str
+from pox.openflow.discovery import LinkEvent, Discovery
 
 # Get the main logger for this component
 log = core.getLogger("PBFT_POX") # Get logger BEFORE launch
@@ -33,180 +35,209 @@ DEFAULT_REPLICA_START_PORT = 50052
 # --- Global variables ---
 _is_primary = True
 _pbft_dealer_endpoint = DEFAULT_PBFT_DEALER_ENDPOINT
-_replica_port = None
+_replica_port = None # For replicas, their listening port
 
 _grpc_stub_dealer = None
 _grpc_channel_dealer = None
 _grpc_server_replica = None
-_grpc_server_thread = None
-_l2_logic = None
+_grpc_server_thread = None # Thread running the replica gRPC server
+_l2_logic = None # Instance of DeterministicL2SwitchLogic
 
 
-# --- Deterministic Logic (Modified to add logging) ---
+# --- Deterministic Logic ---
 class DeterministicL2SwitchLogic:
     def __init__(self, logger):
-        self.mac_to_port = {}
+        self.mac_to_port = {} # Key: dpid_str, Value: {mac_addr_str: out_port_int}
+        self.topology_active_links = set() # Set of frozensets of ((dpid1, port1), (dpid2, port2))
         self.logger = logger
+        self.logger.info("DeterministicL2SwitchLogic initialized.")
 
     def learn_mac(self, dpid_str, src_mac_str, in_port):
-        # This learning should be deterministic based ONLY on packet info
-        # Log at DEBUG or lower to avoid overwhelming output during normal operation
         if dpid_str not in self.mac_to_port:
             self.mac_to_port[dpid_str] = {}
-            # Use the logger passed during initialization
-            self.logger.debug(f"DPID {dpid_str}: Initialized MAC table in deterministic logic.")
-        if src_mac_str not in self.mac_to_port[dpid_str]:
+            self.logger.debug(f"DPID {dpid_str}: Initialized MAC table.")
+        if src_mac_str not in self.mac_to_port[dpid_str] or self.mac_to_port[dpid_str][src_mac_str] != in_port:
             self.mac_to_port[dpid_str][src_mac_str] = in_port
-            self.logger.debug(f"DPID {dpid_str}: Learned MAC {src_mac_str} on port {in_port} in deterministic logic.")
-        elif self.mac_to_port[dpid_str][src_mac_str] != in_port:
-            self.logger.debug(f"DPID {dpid_str}: MAC {src_mac_str} moved from port {self.mac_to_port[dpid_str][src_mac_str]} to {in_port} in deterministic logic.")
-            self.mac_to_port[dpid_str][src_mac_str] = in_port
+            self.logger.debug(f"DPID {dpid_str}: Learned/Updated MAC {src_mac_str} on port {in_port}.")
 
     def compute_action(self, dpid_str, in_port, pkt_data):
-        # This method is called by both the Primary PacketIn handler and the Replica gRPC handler
-        # Use the logger passed during initialization
-        self.logger.debug(f"DPID {dpid_str}: Deterministic logic computing action for PacketIn on port {in_port}. Packet data length: {len(pkt_data)}")
-
+        self.logger.debug(f"DPID {dpid_str}: Computing action for PacketIn on port {in_port}.")
         try:
-            # Attempt to parse the packet
             pkt = ethernet(pkt_data)
         except Exception as e:
-            self.logger.error(f"DPID {dpid_str}: Error parsing packet in deterministic logic: {e}")
-            return None # Cannot compute action if packet is unparseable
+            self.logger.error(f"DPID {dpid_str}: Error parsing packet: {e}")
+            return None
 
         if not pkt.parsed:
-            self.logger.debug(f"DPID {dpid_str}: Could not parse Ethernet packet in deterministic logic.")
+            self.logger.debug(f"DPID {dpid_str}: Could not parse Ethernet packet.")
             return None
-        if pkt.type == ethernet.LLDP_TYPE or pkt.type == 0x86dd: # Ignore LLDP and IPv6
-             self.logger.debug(f"DPID {dpid_str}: Skipping LLDP/IPv6 packet (type: {pkt.type:#06x}) in deterministic logic.")
+        # Ignore LLDP (used by discovery) and IPv6 for this simple L2 switch
+        if pkt.type == ethernet.LLDP_TYPE or pkt.type == ethernet.IPV6_TYPE: # Use defined constants
+             self.logger.debug(f"DPID {dpid_str}: Skipping LLDP/IPv6 packet (type: {pkt.type:#06x}).")
              return None
 
-        dst_mac = str(pkt.dst)
-        src_mac = str(pkt.src)
+        dst_mac_str = str(pkt.dst)
+        src_mac_str = str(pkt.src)
 
-        # Perform learning deterministically based on the packet
-        self.learn_mac(dpid_str, src_mac, in_port)
+        self.learn_mac(dpid_str, src_mac_str, in_port)
 
-        action = None
+        action_dict = None
+        # Check if DPID is known (it should be after learning if it's the source's DPID)
         if dpid_str in self.mac_to_port:
-            if dst_mac in self.mac_to_port[dpid_str]:
-                out_port = self.mac_to_port[dpid_str][dst_mac]
+            if dst_mac_str in self.mac_to_port[dpid_str]:
+                out_port = self.mac_to_port[dpid_str][dst_mac_str]
                 if out_port != in_port:
-                    # The deterministic action is to output to the learned port
-                    action = {'type': 'packet_out', 'out_port': out_port}
-                    self.logger.debug(f"DPID {dpid_str}: Deterministic logic: Known DST {dst_mac}, action packet_out to port {out_port}")
-                else:
-                    self.logger.debug(f"DPID {dpid_str}: Deterministic logic: DST {dst_mac} known on input port {in_port}. No packet_out action needed.")
-                    action = None # No action needed if dest is on the ingress port
-            else:
-                # If destination is unknown, the deterministic action is to flood
-                action = {'type': 'packet_out', 'out_port': of.OFPP_FLOOD}
-                self.logger.debug(f"DPID {dpid_str}: Deterministic logic: Unknown DST {dst_mac}, action packet_out FLOOD.")
+                    action_dict = {'type': 'packet_out', 'out_port': out_port}
+                    self.logger.debug(f"DPID {dpid_str}: Known DST {dst_mac_str}, action packet_out to port {out_port}.")
+                else: # Destination is on the same port packet came in from
+                    self.logger.debug(f"DPID {dpid_str}: DST {dst_mac_str} known on input port {in_port}. No packet_out action needed (drop/ignore).")
+                    action_dict = None # No action implies drop by controller or let switch handle if no flow
+            else: # Destination MAC unknown on this switch
+                action_dict = {'type': 'packet_out', 'out_port': of.OFPP_FLOOD}
+                self.logger.debug(f"DPID {dpid_str}: Unknown DST {dst_mac_str}, action packet_out FLOOD.")
+        else: # DPID itself is unknown (shouldn't happen if learning occurs for src_mac)
+            action_dict = {'type': 'packet_out', 'out_port': of.OFPP_FLOOD}
+            self.logger.warning(f"DPID {dpid_str}: DPID not found in MAC table! Defaulting to FLOOD.")
+        return action_dict
+
+    def update_link_state(self, dpid1_str, port1, dpid2_str, port2, status_enum):
+        # Canonical representation of a link
+        # Sort by DPID, then port to ensure ((d1,p1),(d2,p2)) is same as ((d2,p2),(d1,p1))
+        ep1 = (dpid1_str, int(port1))
+        ep2 = (dpid2_str, int(port2))
+        # Ensure canonical order for the link tuple
+        link_endpoints = tuple(sorted((ep1, ep2)))
+
+        status_name = pbft_consensus_pb2.LinkEventInfo.LinkStatus.Name(status_enum)
+        self.logger.info(f"DeterministicLogic: Updating link state: {dpid1_str}.{port1}-{dpid2_str}.{port2} ({link_endpoints}) -> {status_name}")
+
+        if status_enum == pbft_consensus_pb2.LinkEventInfo.LINK_UP:
+            self.topology_active_links.add(link_endpoints)
+            self.logger.debug(f"Link UP: {link_endpoints} added to topology. Active links: {len(self.topology_active_links)}")
+        elif status_enum == pbft_consensus_pb2.LinkEventInfo.LINK_DOWN:
+            self.topology_active_links.discard(link_endpoints) # discard doesn't raise error if not found
+            self.logger.debug(f"Link DOWN: {link_endpoints} removed from topology. Active links: {len(self.topology_active_links)}")
+            # Potentially clear MAC entries related to this link going down.
+            # This can be complex. A simpler approach is to let MAC entries time out or be re-learned.
+            # For example, if a port involved in the link goes down:
+            self._clear_macs_for_port(dpid1_str, port1)
+            self._clear_macs_for_port(dpid2_str, port2)
         else:
-            # Should not happen if learn_mac is called, but as fallback:
-            action = {'type': 'packet_out', 'out_port': of.OFPP_FLOOD}
-            self.logger.warning(f"DPID {dpid_str}: Deterministic logic: DPID not found in MAC table! Action packet_out FLOOD.")
+            self.logger.warning(f"DeterministicLogic: Received unknown link status enum {status_enum} for link {link_endpoints}")
 
-        self.logger.debug(f"DPID {dpid_str}: Deterministic logic returning action: {action}")
-        return action
+        # Log the current topology (can be verbose)
+        # self.logger.debug(f"Current active links: {self.topology_active_links}")
+
+    def _clear_macs_for_port(self, dpid_str, port_no):
+        if dpid_str in self.mac_to_port:
+            macs_to_remove = [mac for mac, learned_port in self.mac_to_port[dpid_str].items() if learned_port == port_no]
+            if macs_to_remove:
+                self.logger.info(f"DPID {dpid_str}: Clearing {len(macs_to_remove)} MAC entries for port {port_no} due to link change.")
+                for mac in macs_to_remove:
+                    del self.mac_to_port[dpid_str][mac]
+                if not self.mac_to_port[dpid_str]: # If DPID's MAC table is empty
+                    del self.mac_to_port[dpid_str]
+                    self.logger.debug(f"DPID {dpid_str}: MAC table now empty.")
 
 
-# --- Replica gRPC Server Implementation (Modified to use deterministic logic) ---
+# --- Replica gRPC Server Implementation ---
 class PoxReplicaServicer(pbft_consensus_pb2_grpc.RyuReplicaLogicServicer):
     def CalculateAction(self, request, context):
-        # Use a specific logger for the replica handler
         handler_log = core.getLogger("PBFT_POX_ReplicaHandler")
-        peer = context.peer() # Identify the caller
+        peer = context.peer()
+        handler_log.info(f"Replica: Received CalculateAction from {peer}")
+        handler_log.debug(f"  PacketInfo: DPID={request.packet_info.dpid}, InPort={request.packet_info.in_port}, BufID={request.packet_info.buffer_id}")
 
-        handler_log.info(f"Replica Handler: Received CalculateAction request from peer: {peer}")
-        # Log request details at debug level
-        handler_log.debug(f"  Request PacketInfo: DPID={request.packet_info.dpid}, InPort={request.packet_info.in_port}, BufferId={request.packet_info.buffer_id}, TotalLen={request.packet_info.total_len}, DataLen={len(request.packet_info.data)}")
-
-        computed_action_dict = None
-        computed_action_json = "{}" # Default to empty action JSON
-
+        computed_action_json = "{}"
         if _l2_logic:
             try:
-                 # Call the deterministic logic using the global instance
-                 computed_action_dict = _l2_logic.compute_action(
+                 action_dict = _l2_logic.compute_action(
                      request.packet_info.dpid,
                      request.packet_info.in_port,
-                     request.packet_info.data # Pass raw packet data
+                     request.packet_info.data
                  )
-                 handler_log.debug(f"Replica Handler: Deterministic logic returned: {computed_action_dict}")
-
-                 # Convert the result to JSON if it's not None
-                 if computed_action_dict is not None:
-                     computed_action_json = json.dumps(computed_action_dict)
-                 else:
-                     computed_action_json = "{}" # Ensure empty JSON if logic returned None
-
+                 if action_dict:
+                     computed_action_json = json.dumps(action_dict)
+                 handler_log.debug(f"Replica: Deterministic logic computed: {action_dict}")
             except Exception as e:
-                handler_log.exception(f"Replica Handler: Error during deterministic logic computation for peer {peer}: {e}")
+                handler_log.exception(f"Replica: Error in deterministic logic for {peer}: {e}")
                 context.set_code(grpc.StatusCode.INTERNAL)
-                context.set_details(f"Internal error during action computation: {e}")
-                # Return an empty action in case of computation error
-                response_action = pbft_consensus_pb2.Action(action_json="{}")
-                response = pbft_consensus_pb2.CalculateActionResponse(computed_action=response_action)
-                return response
-
+                context.set_details(f"Error computing action: {e}")
+                # Fallback to empty action
+                return pbft_consensus_pb2.CalculateActionResponse(computed_action=pbft_consensus_pb2.Action(action_json="{}"))
         else:
-            # This case should ideally not happen if launch is called correctly, but handle defensively
-            handler_log.error("Replica Handler: Deterministic L2 Logic not initialized!")
+            handler_log.error("Replica: L2 Logic not initialized!")
             context.set_code(grpc.StatusCode.UNAVAILABLE)
-            context.set_details("Replica logic not initialized")
-            # Return an empty action in case of logic not being available
-            response_action = pbft_consensus_pb2.Action(action_json="{}")
-            response = pbft_consensus_pb2.CalculateActionResponse(computed_action=response_action)
-            return response
+            context.set_details("Replica logic unavailable")
+            return pbft_consensus_pb2.CalculateActionResponse(computed_action=pbft_consensus_pb2.Action(action_json="{}"))
 
-
-        handler_log.info(f"Replica Handler: Computed action JSON: {computed_action_json} for peer {peer}")
-
-        # Create the response using the computed JSON string
         response_action = pbft_consensus_pb2.Action(action_json=computed_action_json)
-        response = pbft_consensus_pb2.CalculateActionResponse(computed_action=response_action)
+        handler_log.info(f"Replica: Sending computed action to {peer}: {computed_action_json}")
+        return pbft_consensus_pb2.CalculateActionResponse(computed_action=response_action)
 
-        handler_log.debug(f"Replica Handler: Sending response to peer {peer}.")
-        return response
+    def NotifyLinkEvent(self, request, context):
+        handler_log = core.getLogger("PBFT_POX_ReplicaHandler")
+        peer = context.peer()
+        status_name = pbft_consensus_pb2.LinkEventInfo.LinkStatus.Name(request.status)
+        handler_log.info(f"Replica: Received NotifyLinkEvent from {peer}: "
+                         f"{request.dpid1}.{request.port1} <-> {request.dpid2}.{request.port2} is {status_name}, ts={request.timestamp_ns}")
+
+        if not _l2_logic:
+            handler_log.error("Replica: L2 Logic not initialized! Cannot update link state.")
+            context.set_code(grpc.StatusCode.UNAVAILABLE)
+            context.set_details("Replica logic unavailable")
+            return empty_pb2.Empty() # Use imported Empty
+        try:
+            _l2_logic.update_link_state(
+                request.dpid1, request.port1,
+                request.dpid2, request.port2,
+                request.status # Pass the enum value directly
+            )
+            handler_log.debug(f"Replica: Updated link state successfully from {peer}.")
+        except Exception as e:
+            handler_log.exception(f"Replica: Error updating link state from {peer}: {e}")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(f"Error updating link state: {e}")
+        return empty_pb2.Empty() # Use imported Empty
 
 
-def _run_grpc_server(port):
-    thread_log = core.getLogger("PBFT_POX_Thread")
-    global _grpc_server_replica
-    thread_log.info(f"Replica gRPC Server Thread: Starting on port {port}")
+def _run_grpc_server(port_to_listen): # Renamed arg for clarity
+    global _grpc_server_replica # Allow modification of the global variable
+    thread_log = core.getLogger("PBFT_POX_gRPCThread") # More specific logger name
+    thread_log.info(f"Replica gRPC Server Thread: Starting on port {port_to_listen}")
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10)) # Standard worker count
+    pbft_consensus_pb2_grpc.add_RyuReplicaLogicServicer_to_server(
+        PoxReplicaServicer(), server
+    )
+    listen_addr = f'[::]:{port_to_listen}'
+    server.add_insecure_port(listen_addr)
+    _grpc_server_replica = server # Store the server instance globally
     try:
-        # Note: max_workers=10 is usually sufficient, adjust if needed for very high load
-        server = grpc.server(futures.ThreadPoolExecutor(max_workers=20))
-        pbft_consensus_pb2_grpc.add_RyuReplicaLogicServicer_to_server(
-            PoxReplicaServicer(), server
-        )
-        listen_addr = f'[::]:{port}' # Listen on all interfaces
-        server.add_insecure_port(listen_addr) # Using insecure credentials
-        _grpc_server_replica = server
         server.start()
-        thread_log.info(f"Replica gRPC Server Thread: Listening on {listen_addr}...")
-        server.wait_for_termination() # This blocks until the server is stopped
+        thread_log.info(f"Replica gRPC Server Thread: Listening on {listen_addr}")
+        server.wait_for_termination() # Blocks until server.stop() is called
     except Exception as e:
-        # Log unexpected errors during server runtime
-        thread_log.exception(f"Replica gRPC Server Thread: Failed during runtime - {e}")
+        thread_log.exception(f"Replica gRPC Server Thread: Runtime error - {e}")
     finally:
-        # Ensure server is None if an error occurred or after termination
-        _grpc_server_replica = None
-    thread_log.info("Replica gRPC Server Thread: Server stopped.")
+        _grpc_server_replica = None # Clear global ref on exit
+        thread_log.info("Replica gRPC Server Thread: Stopped.")
 
 
 # --- Main POX Component Logic ---
 class PoxPbftApp:
     def __init__(self):
-        log.info("PoxPbftApp component initializing...")
-        # _l2_logic is now initialized in launch() for both modes
-        # if _is_primary: # This check is no longer strictly necessary here if _l2_logic is global
-        #    _l2_logic = DeterministicL2SwitchLogic(log) # This would re-initialize, should be avoided
-
+        log.info("PoxPbftApp initializing...")
         if _is_primary:
             self.connect_to_dealer()
-        core.openflow.addListeners(self)
+            def register_discovery_listener():
+                if core.hasComponent("openflow_discovery"): 
+                    discovery_component = core.components["openflow_discovery"]
+                    discovery_component.addListenerByName(LinkEvent.__name__, self._handle_LinkEvent)
+                    log.info("Primary: Registered LinkEvent listener with openflow_discovery component.")
+                else:
+                    log.warning("Primary: openflow_discovery component not found. LinkEvent listener NOT registered.")
+            core.call_when_ready(register_discovery_listener, ["openflow_discovery"])
+        core.openflow.addListeners(self) # For ConnectionUp, PacketIn (if primary)
         log.info("PoxPbftApp OpenFlow listeners registered.")
 
     def connect_to_dealer(self):
@@ -215,24 +246,12 @@ class PoxPbftApp:
             log.error("Primary: PBFT_DEALER_ENDPOINT not configured.")
             return
         try:
-            log.info(f"Primary: Attempting to connect to PBFT Dealer at {_pbft_dealer_endpoint}")
-            # Use grpc.insecure_channel for non-TLS connection as per Docker Compose
+            log.info(f"Primary: Connecting to PBFT Dealer at {_pbft_dealer_endpoint}")
             _grpc_channel_dealer = grpc.insecure_channel(_pbft_dealer_endpoint)
-            # Test the channel state proactively? Or rely on the first RPC call?
-            # Example check (optional):
-            # try:
-            #     grpc.channel_ready_future(_grpc_channel_dealer).result(timeout=5)
-            #     log.info("Primary: gRPC channel to Dealer is ready.")
-            # except grpc.FutureTimeoutError:
-            #      log.warning("Primary: gRPC channel to Dealer timed out waiting to be ready.")
-            # except Exception as e:
-            #      log.error(f"Primary: Error checking gRPC channel readiness: {e}")
-
             _grpc_stub_dealer = pbft_consensus_pb2_grpc.PBFTConsensusStub(_grpc_channel_dealer)
-            log.info(f"Primary: gRPC stub created for PBFT Dealer.")
+            log.info("Primary: gRPC stub for PBFT Dealer created.")
         except Exception as e:
-            log.error(f"Primary: Failed to create gRPC channel/stub to PBFT Dealer: {e}")
-            # Ensure cleanup happens if initialization fails
+            log.exception(f"Primary: Failed to create gRPC channel/stub to Dealer: {e}")
             if _grpc_channel_dealer:
                 try: _grpc_channel_dealer.close()
                 except: pass
@@ -242,287 +261,257 @@ class PoxPbftApp:
     def _handle_ConnectionUp(self, event):
         dpid_str = dpid_to_str(event.dpid)
         log.info(f"Switch {dpid_str} connected.")
-        # Install a flow to send all packets to the controller
-        msg = of.ofp_flow_mod()
+        msg = of.ofp_flow_mod(command=of.OFPFC_ADD) # Explicitly ADD
+        msg.match = of.ofp_match() # Match all packets
         msg.actions.append(of.ofp_action_output(port = of.OFPP_CONTROLLER))
-        msg.priority = 0 # Low priority, others can override
-        # No match fields means it matches everything (table-miss)
+        msg.priority = 0 # Lowest priority, so other flows can override
         event.connection.send(msg)
-        log.info(f"Installed table-miss flow entry for switch {dpid_str}")
+        log.info(f"Installed table-miss flow entry for switch {dpid_str} to send to controller.")
+
+    def _handle_LinkEvent(self, event):
+        # This handler is only active if _is_primary (due to listener registration in __init__)
+        dpid1_str = dpid_to_str(event.link.dpid1)
+        port1 = event.link.port1
+        dpid2_str = dpid_to_str(event.link.dpid2)
+        port2 = event.link.port2
+
+        status_proto = pbft_consensus_pb2.LinkEventInfo.LINK_STATUS_UNSPECIFIED
+        status_log_str = "UNKNOWN"
+
+        if event.added:
+            status_proto = pbft_consensus_pb2.LinkEventInfo.LINK_UP
+            status_log_str = "UP"
+            log.info(f"Primary: Link {status_log_str}: {dpid1_str}.{port1} <-> {dpid2_str}.{port2}")
+        elif event.removed:
+            status_proto = pbft_consensus_pb2.LinkEventInfo.LINK_DOWN
+            status_log_str = "DOWN"
+            log.info(f"Primary: Link {status_log_str}: {dpid1_str}.{port1} <-> {dpid2_str}.{port2}")
+        else: # Should not occur for LinkEvent
+            return
+
+        if not _grpc_stub_dealer:
+            log.error(f"Primary: No Dealer connection to report link event {status_log_str} for {dpid1_str} - {dpid2_str}.")
+            return
+
+        link_event_proto = pbft_consensus_pb2.LinkEventInfo(
+            dpid1=dpid1_str,
+            port1=port1,
+            dpid2=dpid2_str,
+            port2=port2,
+            status=status_proto,
+            timestamp_ns=int(time.time() * 1e9) # Current time in nanoseconds
+        )
+
+        try:
+            log.debug(f"Primary: Reporting LinkEvent ({status_log_str}) to Dealer: {link_event_proto}")
+            # The ReportLinkEvent RPC returns Empty, so no response variable needed unless for error checking
+            _grpc_stub_dealer.ReportLinkEvent(link_event_proto, timeout=10) # Add a timeout
+            log.info(f"Primary: Successfully reported LinkEvent ({status_log_str}) to Dealer for {dpid1_str}-{dpid2_str}.")
+        except grpc.RpcError as e_rpc:
+            log.error(f"Primary: gRPC ReportLinkEvent failed for {dpid1_str}-{dpid2_str}: {e_rpc.code()} - {e_rpc.details()}")
+        except Exception as e_gen:
+            log.exception(f"Primary: Unexpected error reporting LinkEvent for {dpid1_str}-{dpid2_str}: {e_gen}")
+
 
     def _handle_PacketIn(self, event):
-        # Only process PacketIn events if running as Primary
         if not _is_primary:
-            log.debug("Replica: Ignoring PacketIn event (not primary)")
             return
 
         packet = event.parsed
-        # Do basic packet validity checks before processing
         if not packet.parsed:
-            log.warning("Primary: Ignoring incompletely parsed packet")
+            log.warning("Primary: Ignoring incompletely parsed packet.")
             return
-        if packet.type == ethernet.LLDP_TYPE or packet.type == 0x86dd: # Ignore LLDP and IPv6
-            log.debug(f"Primary (DPID {dpid_to_str(event.dpid)}): Skipping LLDP/IPv6 packet (type: {packet.type:#06x}).")
+        # Use constants for LLDP and IPV6 types for clarity
+        if packet.type == ethernet.LLDP_TYPE or packet.type == ethernet.IPV6_TYPE:
             return
 
-        # Use the global _l2_logic instance (initialized in launch)
         if not _l2_logic:
-            log.error(f"Primary (DPID {dpid_to_str(event.dpid)}): L2 Logic not initialized!")
-            # Decide how to handle: Drop packet? Flood?
-            # For now, just log error and stop processing this packet
+            log.error(f"Primary (DPID {dpid_to_str(event.dpid)}): L2 Logic not initialized! Cannot process PacketIn.")
             return
 
         dpid_str = dpid_to_str(event.dpid)
         in_port = event.port
-
-        # Compute the *proposed* action using the deterministic logic
-        # Note: The Primary also uses the deterministic logic, as it *proposes*
-        # the action that *should* result from deterministic rules.
         proposed_action_dict = _l2_logic.compute_action(dpid_str, in_port, event.data)
 
-        # If the deterministic logic says "no action needed" (e.g., dest is on ingress port)
-        if not proposed_action_dict:
-            log.info(f"Primary (DPID {dpid_str}): Deterministic logic proposed no action. Ignoring PacketIn for consensus.")
-            # Optionally send PacketOut to drop or handle specially
-            # Example to just drop (send PacketOut with no actions):
-            # msg = of.ofp_packet_out(data = event.ofp) # Use original OF packet
-            # # No actions list means drop
-            # event.connection.send(msg)
+        if not proposed_action_dict: # If logic returns None (e.g., drop or no action)
+            log.info(f"Primary (DPID {dpid_str}): Deterministic logic proposed no action. PacketIn not sent for consensus.")
             return
 
-        # Prepare the gRPC request to the Dealer
         proposed_action_json = json.dumps(proposed_action_dict)
-        log.info(f"Primary (DPID {dpid_str}): Proposed action: {proposed_action_json}")
+        log.info(f"Primary (DPID {dpid_str}): Proposed action for PacketIn: {proposed_action_json}")
 
-        # Check if Dealer gRPC stub is available
         if not _grpc_stub_dealer:
-            log.error(f"Primary (DPID {dpid_str}): No Dealer connection available to request consensus. Cannot process PacketIn.")
-            # Decide how to handle: Drop packet? Flood anyway without consensus?
-            # Flooding might be a reasonable fallback in some scenarios, but here we stop.
-            # Example to flood (same as 'out_port': of.OFPP_FLOOD action):
-            # msg = of.ofp_packet_out()
-            # msg.actions.append(of.ofp_action_output(port=of.OFPP_FLOOD))
-            # msg.buffer_id = event.ofp.buffer_id # Use buffer_id if possible
-            # if msg.buffer_id is None or msg.buffer_id == 0xffffffff:
-            #     msg.data = event.data # Or include packet data if buffer_id is invalid
-            # msg.in_port = event.port
-            # event.connection.send(msg)
-            # log.warning(f"Primary (DPID {dpid_str}): Flooding due to no Dealer connection.")
-            return # Stop processing this packet
+            log.error(f"Primary (DPID {dpid_str}): No Dealer connection. Cannot request consensus for PacketIn.")
+            return
 
-        # Populate PacketInfo protobuf message
-        ofp_msg = event.ofp
+        ofp_msg = event.ofp # Original OpenFlow message from the event
         packet_info_proto = pbft_consensus_pb2.PacketInfo(
             dpid=dpid_str,
             in_port=in_port,
-            # Handle potential None or 0xffffffff for buffer_id/total_len
             buffer_id=ofp_msg.buffer_id if ofp_msg.buffer_id is not None and ofp_msg.buffer_id != 0xffffffff else 0,
-            total_len=ofp_msg.total_len if ofp_msg.total_len is not None else len(event.data), # Fallback to data length if total_len is None
-            data=event.data # Include the raw packet data
-            # Add other fields from msg.match if needed by deterministic logic in the future
+            total_len=ofp_msg.total_len if ofp_msg.total_len is not None else len(event.data),
+            data=event.data
         )
-
-        # Populate Action protobuf message for the proposed action
         proposed_action_proto = pbft_consensus_pb2.Action(action_json=proposed_action_json)
-
-        # Create the final ConsensusRequest protobuf message
-        request = pbft_consensus_pb2.ConsensusRequest(
+        request_proto = pbft_consensus_pb2.ConsensusRequest(
             packet_info=packet_info_proto,
             proposed_action=proposed_action_proto
         )
 
-        # Send the gRPC request in a separate thread to avoid blocking the POX main loop
-        thread = threading.Thread(target=self._request_consensus_in_thread, args=(event, request), daemon=True)
+        # Use a daemon thread for the gRPC call to avoid blocking POX core
+        thread = threading.Thread(target=self._request_consensus_in_thread, args=(event, request_proto), daemon=True)
         thread.start()
 
-    def _request_consensus_in_thread(self, event, request):
+    def _request_consensus_in_thread(self, event, request_proto):
         dpid_str = dpid_to_str(event.dpid)
-        # Ensure gRPC stub is still available in the thread
-        if not _grpc_stub_dealer:
-            log.error(f"Primary Thread (DPID {dpid_str}): gRPC stub is None during threaded call. Cannot send request.")
+        if not _grpc_stub_dealer: # Re-check in thread context
+            log.error(f"Primary Thread (DPID {dpid_str}): Dealer stub unavailable. Cannot send ConsensusRequest.")
             return
-
         try:
             log.info(f"Primary Thread (DPID {dpid_str}): Sending ConsensusRequest to Dealer...")
             start_time = time.time()
-            # Set a timeout for the gRPC call
-            # Use a context with timeout if needed for more granular control
-            # context_timeout = 10 # seconds, matches your POX log, corresponds to Dealer's 30s wait
-            response = _grpc_stub_dealer.RequestConsensus(request, timeout=30) # Use timeout parameter
-
+            response = _grpc_stub_dealer.RequestConsensus(request_proto, timeout=30) # 30s timeout
             latency = time.time() - start_time
-            # Log response details
-            log.info(f"Primary Thread (DPID {dpid_str}): Received Response from Dealer in {latency:.4f}s. Consensus={response.consensus_reached}, Status='{response.status_message}'")
-
-            # Schedule the execution of the final action back on the POX main thread/core loop
+            log.info(f"Primary Thread (DPID {dpid_str}): Received ConsensusResponse from Dealer in {latency:.4f}s. "
+                     f"Consensus={response.consensus_reached}, Status='{response.status_message}'")
             core.callLater(self._execute_final_action, event, response)
-
-        except grpc.RpcError as e:
+        except grpc.RpcError as e_rpc:
             latency = time.time() - start_time
-            # Log gRPC specific errors
-            log.error(f"Primary Thread (DPID {dpid_str}): gRPC call to Dealer failed after {latency:.4f}s: Code={e.code()}, Details='{e.details()}'")
-        except Exception as e:
+            log.error(f"Primary Thread (DPID {dpid_str}): gRPC ConsensusRequest failed after {latency:.4f}s: {e_rpc.code()} - {e_rpc.details()}")
+        except Exception as e_gen:
             latency = time.time() - start_time
-            # Log any other unexpected errors
-            log.exception(f"Primary Thread (DPID {dpid_str}): Unexpected error during gRPC call: {e}")
+            log.exception(f"Primary Thread (DPID {dpid_str}): Unexpected error during ConsensusRequest after {latency:.4f}s: {e_gen}")
 
-    def _execute_final_action(self, event, response):
+    def _execute_final_action(self, event, response_proto):
         dpid_str = dpid_to_str(event.dpid)
-        # Validate the response received from the Dealer
-        if not response:
-             log.warning(f"Primary Execute (DPID {dpid_str}): Received None response from Dealer.")
+        if not response_proto:
+             log.warning(f"Primary Execute (DPID {dpid_str}): Received None response_proto from Dealer.")
              return
-        if not response.consensus_reached:
-            log.warning(f"Primary Execute (DPID {dpid_str}): Consensus not reached according to Dealer. Status: {getattr(response, 'status_message', 'N/A')}")
-            # Decide how to handle non-consensus: Drop packet? Re-initiate?
+        if not response_proto.consensus_reached:
+            log.warning(f"Primary Execute (DPID {dpid_str}): Consensus not reached. Status: {getattr(response_proto, 'status_message', 'N/A')}")
             return
-        # Check if final_action and its content are present
-        if not response.final_action or not response.final_action.action_json:
-            log.warning(f"Primary Execute (DPID {dpid_str}): Consensus reached, but no final action provided in response.")
+        if not response_proto.final_action or not response_proto.final_action.action_json:
+            log.warning(f"Primary Execute (DPID {dpid_str}): Consensus reached, but no final_action provided.")
             return
 
-        # Execute the action agreed upon by consensus
-        final_action_json = response.final_action.action_json
-
-        # Handle the empty action case explicitly (often means drop or no-op)
-        if final_action_json == "{}" or final_action_json is None: # Check for None defensively
-            log.info(f"Primary Execute (DPID {dpid_str}): Received empty final action JSON (no-op).")
-            # Depending on desired behavior, might explicitly send a drop packet_out here
+        final_action_json = response_proto.final_action.action_json
+        if final_action_json == "{}" or final_action_json is None:
+            log.info(f"Primary Execute (DPID {dpid_str}): Received empty final_action (no-op).")
             return
 
         try:
-            # Parse the action JSON string
             action_dict = json.loads(final_action_json)
             log.info(f"Primary Execute (DPID {dpid_str}): Executing final action: {action_dict}")
-
-            # Process the action dictionary
             action_type = action_dict.get('type')
 
             if action_type == 'packet_out':
-                # Build and send PacketOut message
                 out_port_val = action_dict.get('out_port')
                 if out_port_val is None:
-                    log.error(f"Execute (DPID {dpid_str}): packet_out action missing 'out_port'.")
+                    log.error(f"Execute (DPID {dpid_str}): packet_out missing 'out_port'.")
                     return
 
-                # Convert out_port value (could be int or string like "FLOOD")
                 if isinstance(out_port_val, str) and out_port_val.upper() == 'FLOOD':
                     out_port = of.OFPP_FLOOD
                 else:
-                    try:
-                        out_port = int(out_port_val)
+                    try: out_port = int(out_port_val)
                     except (ValueError, TypeError):
-                        log.error(f"Execute (DPID {dpid_str}): Invalid out_port value '{out_port_val}'. Must be int or 'FLOOD'.")
+                        log.error(f"Execute (DPID {dpid_str}): Invalid out_port '{out_port_val}'.")
                         return
 
                 msg = of.ofp_packet_out()
                 msg.actions.append(of.ofp_action_output(port=out_port))
-
-                # Use the original buffer_id if it's valid, otherwise include packet data
                 if event.ofp.buffer_id is not None and event.ofp.buffer_id != 0xffffffff:
                     msg.buffer_id = event.ofp.buffer_id
-                    msg.data = None # Clear data if using buffer_id
-                else:
-                    msg.buffer_id = 0xffffffff # Indicate no buffer_id
-                    msg.data = event.data # Include original packet data
-
-                msg.in_port = event.port # The port the packet came in on
-
-                # Send the constructed OpenFlow message to the switch connection
+                else: # No valid buffer_id, send raw packet data
+                    msg.buffer_id = 0xffffffff
+                    msg.data = event.data
+                msg.in_port = event.port
                 event.connection.send(msg)
-                log.debug(f"Execute (DPID {dpid_str}): Sent PacketOut to port {out_port_val}")
+                log.debug(f"Execute (DPID {dpid_str}): Sent PacketOut to port {out_port_val}.")
 
             elif action_type == 'flow_mod':
-                log.warning(f"Execute (DPID {dpid_str}): FlowMod execution is not yet implemented.")
-                # Implement logic to build and send of.ofp_flow_mod message
-                pass # Placeholder
-
+                log.warning(f"Execute (DPID {dpid_str}): FlowMod execution not fully implemented.")
+                # Placeholder for flow_mod logic
             else:
-                log.warning(f"Execute (DPID {dpid_str}): Received unknown action type '{action_type}'")
+                log.warning(f"Execute (DPID {dpid_str}): Unknown action type '{action_type}'.")
 
         except json.JSONDecodeError:
-            # Log errors during JSON parsing
-            log.error(f"Primary Execute (DPID {dpid_str}): Failed to decode final action JSON: {final_action_json}")
+            log.error(f"Primary Execute (DPID {dpid_str}): Failed to decode final_action_json: {final_action_json}")
         except Exception as e_exec:
-            # Log any other errors during action execution
-            log.exception(f"Primary Execute (DPID {dpid_str}): Error during action execution: {e_exec}")
+            log.exception(f"Primary Execute (DPID {dpid_str}): Error executing final_action: {e_exec}")
 
 
 def _cleanup():
-    log.info("--- Stopping PBFT POX App ---")
-    # Close the gRPC channel to the Dealer if it exists
+    log.info("--- POX PBFT App Cleaning Up ---")
+    global _grpc_channel_dealer, _grpc_server_replica, _grpc_server_thread
     if _grpc_channel_dealer:
-        log.info("Primary: Closing gRPC channel to PBFT Dealer.")
+        log.info("Primary: Closing gRPC channel to Dealer.")
         try: _grpc_channel_dealer.close()
         except Exception as e: log.error(f"Error closing dealer channel: {e}")
-    # Stop the Replica gRPC server if it exists
+        _grpc_channel_dealer = None
+
     if _grpc_server_replica:
         log.info("Replica: Stopping gRPC server...")
-        # stop() is non-blocking, wait() is needed for graceful shutdown
-        # Or use stop(grace_period)
-        try: _grpc_server_replica.stop(5) # Give 5 seconds for graceful shutdown
-        except Exception as e: log.error(f"Error stopping replica server: {e}")
-        # Wait for the server thread to finish if it was started
-        if _grpc_server_thread and _grpc_server_thread.is_alive():
-             log.debug("Waiting for gRPC server thread to join...")
-             _grpc_server_thread.join(5) # Wait up to 5 seconds for the thread
-             if _grpc_server_thread.is_alive():
-                  log.warning("gRPC server thread did not join gracefully.")
+        try: _grpc_server_replica.stop(grace=5.0) # 5s grace period
+        except Exception as e: log.error(f"Error stopping replica gRPC server: {e}")
+        _grpc_server_replica = None
+
+    if _grpc_server_thread and _grpc_server_thread.is_alive():
+        log.info("Replica: Waiting for gRPC server thread to join...")
+        _grpc_server_thread.join(timeout=5.0)
+        if _grpc_server_thread.is_alive():
+            log.warning("Replica: gRPC server thread did not join gracefully.")
+        _grpc_server_thread = None
+    log.info("--- POX PBFT App Cleanup Complete ---")
 
 
 # --- launch() function ---
 def launch(primary="true", dealer_ip=None, dealer_port=None, replica_id=None):
     global _is_primary, _replica_port, _l2_logic, _pbft_dealer_endpoint, _grpc_server_thread
 
-    _is_primary = primary.lower() == "true"
-    # Initialize the deterministic logic instance. It's used by BOTH primary and replicas.
-    # Pass the main logger to the logic class.
-    _l2_logic = DeterministicL2SwitchLogic(log)
-    log.info("DeterministicL2SwitchLogic initialized.")
+    # Make sure gRPC stubs are imported correctly
+    if not hasattr(pbft_consensus_pb2, 'PacketInfo') or \
+       not hasattr(pbft_consensus_pb2_grpc, 'PBFTConsensusStub'):
+        log.critical("Failed to import generated gRPC stubs. Check paths and regeneration.")
+        return
 
-    # Setup based on primary or replica mode
+    _is_primary = primary.lower() == "true"
+    _l2_logic = DeterministicL2SwitchLogic(core.getLogger("PBFT_POX_L2Logic")) # Use a specific logger for L2 logic
+
     if _is_primary:
         log.info("--- Starting PBFT POX App (Mode: PRIMARY) ---")
-        # Primary requires Dealer connection details
         if not dealer_ip or not dealer_port:
-            log.error("Primary mode requires --dealer_ip and --dealer_port arguments.")
-            return # Exit launch if required args are missing
+            log.error("Primary mode requires --dealer_ip and --dealer_port.")
+            return
         _pbft_dealer_endpoint = f"{dealer_ip}:{dealer_port}"
-        log.info(f"Dealer endpoint set to: {_pbft_dealer_endpoint}")
-
-        # Register the main application component
+        log.info(f"Primary: PBFT Dealer endpoint set to: {_pbft_dealer_endpoint}")
         core.registerNew(PoxPbftApp)
-
     else: # Replica mode
         log.info("--- Starting PBFT POX App (Mode: REPLICA) ---")
-        # Replica requires an ID to determine its port
         if replica_id is None:
-            log.error("Replica mode requires --replica_id argument.")
-            return # Exit launch if required args are missing
+            log.error("Replica mode requires --replica_id.")
+            return
         try:
-            # Calculate the replica's gRPC listening port based on its ID
             replica_id_int = int(replica_id)
-            _replica_port = DEFAULT_REPLICA_START_PORT + replica_id_int
+            _replica_port = DEFAULT_REPLICA_START_PORT + replica_id_int # Calculate port
             log.info(f"Replica ID: {replica_id_int}, gRPC Port: {_replica_port}")
 
-            # Start the gRPC server for replicas in a separate thread
-            # Use a daemon thread so it doesn't prevent POX from exiting
+            # Start gRPC server in a daemon thread for this replica
             _grpc_server_thread = threading.Thread(
                 target=_run_grpc_server,
-                args=(_replica_port,),
+                args=(_replica_port,), # Pass calculated port
                 daemon=True,
-                name=f"gRPCReplicaServer-{replica_id_int}" # Give the thread a name for easier debugging
+                name=f"gRPCReplicaServer-{replica_id_int}"
             )
             _grpc_server_thread.start()
-            log.info(f"Replica gRPC server thread started (Port: {_replica_port}).")
-
+            log.info(f"Replica: gRPC server thread started for port {_replica_port}.")
         except ValueError:
             log.error(f"Invalid replica_id: '{replica_id}'. Must be an integer.")
-            return # Exit launch if ID is invalid
+            return
         except Exception as e:
             log.exception(f"Failed to start replica gRPC server thread: {e}")
-            return # Exit launch on thread start error
+            return
 
-    # Add a listener for POX GoingDownEvent to perform cleanup
+    # Register cleanup function for when POX is shutting down
     core.addListenerByName("GoingDownEvent", lambda event: _cleanup())
     log.info("PBFT POX Application Component Launched.")

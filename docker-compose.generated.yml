@@ -57,10 +57,14 @@ services:
     - --acceptUnknownTx
     - --debug
     - trace
+    - --httpChain
+    - '7000'
     networks:
     - pbft_net
     depends_on:
     - pbft-bootstrap
+    ports:
+    - 8080:7000
   pbft-node-1:
     build:
       context: ./Sabine_ODL_Fork
@@ -130,12 +134,12 @@ services:
     - ./pox.py
     - log.level
     - --DEBUG
+    - openflow.discovery
+    - --eat_early_packets=false
     - pbft_pox_app
     - --primary=true
     - --dealer_ip=pbft-dealer
     - --dealer_port=50051
-    - openflow.discovery
-    - --eat_early_packets=false
     networks:
     - pbft_net
     ports:

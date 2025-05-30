@@ -6,17 +6,18 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/binary"
+	"strings" // Added for string manipulation
 	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	"google.golang.org/grpc/status" // For gRPC status codes
 
 	pbftconsensus "pbftnode/proto"
 	"pbftnode/source/Blockchain"
 )
 
 const ChannelSize = 64
-
 const ReplicaTimeout = 20 * time.Second
 
 type PBFTStateConsensus struct {
@@ -66,7 +67,7 @@ func NewPBFTStateConsensus(wallet *Blockchain.Wallet, numberOfNode int, param Bl
 		chanUpdateStatus:  make(chan Blockchain.Message, ChannelSize),
 		BlockPoolNV:       Blockchain.NewBlockPool(),
 		acceptUnknownTx:   param.AcceptTxFromUnknown,
-		replicaClient:     param.ReplicaClient, // Store the provided gRPC client
+		replicaClient:     param.ReplicaClient,
 		knownDealerPubKey: Blockchain.NewWallet("DEALER").PublicKey(),
 	}
 
@@ -74,21 +75,18 @@ func NewPBFTStateConsensus(wallet *Blockchain.Wallet, numberOfNode int, param Bl
 		consensus.state = NewRoundProposerSt
 	}
 	consensus.stateFonct = consensus.updateStateFct()
-
 	consensus.Broadcast = param.Broadcast
 	consensus.PoANV = param.PoANV
 	consensus.RamOpt = !param.Broadcast && param.RamOpt
 
 	go consensus.MsgHandlerGoroutine(consensus.chanUpdateStatus, consensus.chanReceivMsg, consensus.toKill)
 	go consensus.transactionHandler(consensus.chanUpdateStatus, consensus.chanTxMsg, consensus.TransactionPool.GetStopingChan())
-
 	consensus.Control = Blockchain.NewControlFeedBack(consensus.Metrics, consensus, param.ModelFile, param.ControlPeriod)
 
 	log.Info().Int("nodeId", consensus.GetId()).Msg("PBFT State Consensus initialized")
 	if consensus.replicaClient == nil {
-		log.Warn().Int("nodeId", consensus.GetId()).Msg("ReplicaClient is nil, SDN control validation disabled.")
+		log.Warn().Int("nodeId", consensus.GetId()).Msg("ReplicaClient is nil, SDN control/link validation disabled.")
 	}
-
 	return consensus
 }
 
@@ -123,24 +121,37 @@ func (consensus *PBFTStateConsensus) MessageHandler(message Blockchain.Message) 
 	}
 
 	senderPubKey := message.Data.GetProposer()
-
 	isKnownValidator := consensus.Validators.IsValidator(senderPubKey)
 	isKnownDealer := bytes.Equal(senderPubKey, consensus.knownDealerPubKey)
-
 	allowMessage := false
 
 	if isKnownValidator {
 		allowMessage = true
 	} else if isKnownDealer {
+		// Allow transactions (SDN or LinkEvent) from the dealer
+		if _, okSdn := message.Data.(Blockchain.Transaction).TransaCore.Input.(Blockchain.SdnControlInput); okSdn {
+			allowMessage = true
+			log.Debug().Str("sender", base64.StdEncoding.EncodeToString(senderPubKey)).Str("type", "SdnControlInputTx").Msg("Allowing SdnControlInput transaction from known Dealer")
+		} else if _, okLink := message.Data.(Blockchain.Transaction).TransaCore.Input.(Blockchain.LinkEventInput); okLink {
+			allowMessage = true
+			log.Debug().Str("sender", base64.StdEncoding.EncodeToString(senderPubKey)).Str("type", "LinkEventInputTx").Msg("Allowing LinkEventInput transaction from known Dealer")
+		} else if message.Flag == Blockchain.TransactionMess { // Allow other general transactions from dealer if acceptUnknownTx is true
+			allowMessage = consensus.acceptUnknownTx
+			if allowMessage {
+				log.Debug().Str("sender", base64.StdEncoding.EncodeToString(senderPubKey)).Str("type", "GenericTx").Msg("Allowing generic transaction from known Dealer (acceptUnknownTx=true)")
+			} else {
+				log.Warn().Str("sender", base64.StdEncoding.EncodeToString(senderPubKey)).Str("type", "GenericTx").Msg("Dropping generic transaction from known Dealer (acceptUnknownTx=false)")
+			}
+		} else {
+			log.Warn().Str("sender", base64.StdEncoding.EncodeToString(senderPubKey)).Str("type", message.Flag.String()).Msg("Dropping non-transaction message from Dealer (not typical)")
+		}
 
-		log.Debug().Str("sender", base64.StdEncoding.EncodeToString(senderPubKey)).Str("type", message.Flag.String()).Msg("Allowing message from known Dealer")
-		allowMessage = true
 	} else if message.Flag == Blockchain.TransactionMess && consensus.acceptUnknownTx {
 		if tx, ok := message.Data.(Blockchain.Transaction); ok && !tx.IsCommand() {
-			log.Debug().Str("sender", base64.StdEncoding.EncodeToString(senderPubKey)).Msg("Allowing transaction from unknown sender (acceptUnknownTx=true)")
 			allowMessage = true
+			log.Debug().Str("sender", base64.StdEncoding.EncodeToString(senderPubKey)).Msg("Allowing transaction from unknown sender (acceptUnknownTx=true)")
 		} else {
-			log.Warn().Str("sender", base64.StdEncoding.EncodeToString(senderPubKey)).Msg("Dropping Command transaction from unknown sender (or acceptUnknownTx=false)")
+			log.Warn().Str("sender", base64.StdEncoding.EncodeToString(senderPubKey)).Msg("Dropping Command transaction from unknown sender or non-SdnControlInput/LinkEventInput from non-validator")
 		}
 	} else {
 		log.Warn().Str("sender", base64.StdEncoding.EncodeToString(senderPubKey)).
@@ -149,7 +160,7 @@ func (consensus *PBFTStateConsensus) MessageHandler(message Blockchain.Message) 
 	}
 
 	if !allowMessage {
-		return // Drop the message
+		return
 	}
 
 	if message.Priority {
@@ -159,14 +170,13 @@ func (consensus *PBFTStateConsensus) MessageHandler(message Blockchain.Message) 
 			log.Warn().Str("type", message.Flag.String()).Msg("Priority message channel full, dropping message.")
 		}
 	} else {
-		// Standard routing (no special handling for Dealer Tx here)
 		if message.Flag == Blockchain.TransactionMess {
 			select {
 			case consensus.chanTxMsg <- message:
 			default:
 				log.Warn().Str("type", message.Flag.String()).Msg("Transaction message channel full, dropping message.")
 			}
-		} else { // Handle PrePrepare, Prepare, Commit, etc.
+		} else {
 			select {
 			case consensus.chanReceivMsg <- message:
 			default:
@@ -175,8 +185,6 @@ func (consensus *PBFTStateConsensus) MessageHandler(message Blockchain.Message) 
 		}
 	}
 }
-
-// transactionHandler processes transactions from its dedicated channel.
 func (consensus *PBFTStateConsensus) transactionHandler(chanUpdateStatus chan<- Blockchain.Message, channelTx <-chan Blockchain.Message, stopAddTxChan <-chan bool) {
 	var addTx = true
 	var droppedCount int64 = 0
@@ -194,47 +202,56 @@ func (consensus *PBFTStateConsensus) transactionHandler(chanUpdateStatus chan<- 
 				continue
 			}
 
-			// Process all transactions received on this channel
-			if addTx || transac.IsCommand() {
-				if droppedCount > 0 {
-					log.Warn().Int64("count", droppedCount).Msg("Resuming transaction processing after dropping.")
-					droppedCount = 0
+			if addTx || transac.IsCommand() { // Always add commands
+				// Also always add SdnControlInput and LinkEventInput regardless of addTx status if from dealer/validator
+				_, isSdn := transac.TransaCore.Input.(Blockchain.SdnControlInput)
+				_, isLink := transac.TransaCore.Input.(Blockchain.LinkEventInput)
+
+				if isSdn || isLink || addTx || transac.IsCommand() {
+					if droppedCount > 0 && !(isSdn || isLink || transac.IsCommand()) { // Only log resume for normal tx
+						log.Warn().Int64("count", droppedCount).Msg("Resuming transaction processing after dropping.")
+						droppedCount = 0
+					}
+					consensus.receiveTransacMess(msg) // Validate and add to pool
+					select {
+					case chanUpdateStatus <- msg:
+						log.Trace().Str("txHash", transac.GetHashPayload()).Msg("transactionHandler: Signaled chanUpdateStatus.")
+					default:
+						log.Warn().Str("txHash", transac.GetHashPayload()).Msg("transactionHandler: chanUpdateStatus was full, signal potentially dropped.")
+					}
+				} else { // Was a normal tx and addTx is false
+					droppedCount++
+					if droppedCount%1000 == 1 {
+						log.Warn().Int64("droppedSoFar", droppedCount).Msg("Transaction pool likely full, dropping incoming normal transaction.")
+					}
 				}
-				// Now calling receiveTransacMess (which validates and calls ReceiveTrustedMess)
-				consensus.receiveTransacMess(msg) // Validate and add to pool
-				select {
-				case chanUpdateStatus <- msg:
-					log.Trace().Str("txHash", transac.GetHashPayload()).Msg("transactionHandler: Signaled chanUpdateStatus.")
-				default:
-					log.Warn().Str("txHash", transac.GetHashPayload()).Msg("transactionHandler: chanUpdateStatus was full, signal potentially dropped for this new transaction.")
-				}
-			} else {
+			} else { // Normal tx and addTx is false
 				droppedCount++
 				if droppedCount%1000 == 1 {
-					log.Warn().Int64("droppedSoFar", droppedCount).Msg("Transaction pool likely full, dropping incoming transaction.")
+					log.Warn().Int64("droppedSoFar", droppedCount).Msg("Transaction pool likely full, dropping incoming normal transaction.")
 				}
 			}
-		case addTx = <-stopAddTxChan: // Signal from TransactionPool about overload status
+
+		case addTx = <-stopAddTxChan:
 			if addTx {
 				if droppedCount > 0 {
 					log.Warn().Int64("at", time.Now().UnixNano()).
 						Int64("totalDropped", droppedCount).
-						Msg("Transaction pool below threshold, resuming adding transactions.")
+						Msg("Transaction pool below threshold, resuming adding normal transactions.")
 					droppedCount = 0
 				} else {
 					log.Info().Msg("Transaction pool below threshold, continuing normal operation.")
 				}
 			} else {
 				log.Warn().Int64("at", time.Now().UnixNano()).
-					Msg("Transaction pool threshold reached. Dropping new non-command transactions.")
+					Msg("Transaction pool threshold reached. Dropping new non-command/non-SDN/non-Link transactions.")
 			}
 		}
 	}
 }
 
 func (consensus *PBFTStateConsensus) drainAndUpdateState(triggeringMessage Blockchain.Message) {
-	// Process the initial triggering message
-	if triggeringMessage.Data != nil { // Ensure it's a valid message
+	if triggeringMessage.Data != nil {
 		consensus.updateStatusWithMsg(triggeringMessage)
 	}
 	for {
@@ -242,15 +259,14 @@ func (consensus *PBFTStateConsensus) drainAndUpdateState(triggeringMessage Block
 		case message, ok := <-consensus.chanUpdateStatus:
 			if !ok {
 				log.Info().Int("nodeId", consensus.GetId()).Msg("drainAndUpdateState: chanUpdateStatus closed.")
-				return // Channel closed
+				return
 			}
-			if message.Data == nil { // Skip empty/nil trigger messages if any
+			if message.Data == nil {
 				continue
 			}
 			log.Debug().Int("nodeId", consensus.GetId()).Str("trigger", message.Flag.String()).Msg("drainAndUpdateState: Processing additional signal from chanUpdateStatus.")
 			consensus.updateStatusWithMsg(message)
 		default:
-			// No more messages in chanUpdateStatus right now
 			log.Debug().Int("nodeId", consensus.GetId()).Msg("drainAndUpdateState: chanUpdateStatus drained for now.")
 			return
 		}
@@ -260,7 +276,6 @@ func (consensus *PBFTStateConsensus) drainAndUpdateState(triggeringMessage Block
 func (consensus *PBFTStateConsensus) MsgHandlerGoroutine(chanUpdateStatus chan Blockchain.Message, chanReceivMsg <-chan Blockchain.Message, toKill <-chan chan struct{}) {
 	log.Info().Int("nodeId", consensus.GetId()).Msg("Message handler goroutine started.")
 	for {
-		// Prioritize shutdown
 		select {
 		case channel, ok := <-toKill:
 			if !ok {
@@ -268,31 +283,25 @@ func (consensus *PBFTStateConsensus) MsgHandlerGoroutine(chanUpdateStatus chan B
 				return
 			}
 			log.Info().Int("nodeId", consensus.GetId()).Msg("Message handler goroutine shutting down on signal.")
-			channel <- struct{}{} // Acknowledge shutdown
+			channel <- struct{}{}
 			return
 		default:
-			// Not shutting down, continue
 		}
 
-		// Prioritize processing state updates that have already been signaled
 		select {
 		case message, ok := <-chanUpdateStatus:
 			if !ok {
-				log.Warn().Int("nodeId", consensus.GetId()).Msg("chanUpdateStatus is closed, but toKill was not. This is unexpected. Exiting.")
+				log.Warn().Int("nodeId", consensus.GetId()).Msg("chanUpdateStatus is closed, but toKill was not. Exiting.")
 				return
 			}
-			if message.Data != nil { // Check if it's a real message, not just a placeholder
+			if message.Data != nil {
 				log.Debug().Int("nodeId", consensus.GetId()).Str("trigger", message.Flag.String()).Msg("MsgHandlerGoroutine: Picked from chanUpdateStatus.")
-				consensus.drainAndUpdateState(message) // Drain and process all queued updates
+				consensus.drainAndUpdateState(message)
 			}
-			continue // After draining updates, immediately re-evaluate priorities (loop back to check toKill, then chanUpdateStatus again)
+			continue
 		default:
-			// No pending state updates to prioritize, try to read external messages
 		}
 
-		// Now check external message channels (Prio then Regular)
-		// We use a single select here to fairly choose between prio and regular if both are ready,
-		// but the structure above tries to give chanUpdateStatus precedence.
 		select {
 		case message, ok := <-consensus.chanPrioInMsg:
 			if !ok {
@@ -300,8 +309,8 @@ func (consensus *PBFTStateConsensus) MsgHandlerGoroutine(chanUpdateStatus chan B
 				return
 			}
 			log.Debug().Int("nodeId", consensus.GetId()).Str("msgType", message.Flag.String()).Msg("MsgHandlerGoroutine: Picked from chanPrioInMsg.")
-			consensus.handleOneMsg(message, chanUpdateStatus) // This will signal chanUpdateStatus
-			consensus.drainAndUpdateState(message)            // Immediately process the update caused by this prio message
+			consensus.handleOneMsg(message, chanUpdateStatus)
+			consensus.drainAndUpdateState(message)
 
 		case message, ok := <-chanReceivMsg:
 			if !ok {
@@ -309,10 +318,10 @@ func (consensus *PBFTStateConsensus) MsgHandlerGoroutine(chanUpdateStatus chan B
 				return
 			}
 			log.Debug().Int("nodeId", consensus.GetId()).Str("msgType", message.Flag.String()).Msg("MsgHandlerGoroutine: Picked from chanReceivMsg.")
-			consensus.handleOneMsg(message, chanUpdateStatus) // This will signal chanUpdateStatus
-			consensus.drainAndUpdateState(message)            // Immediately process the update caused by this regular message
+			consensus.handleOneMsg(message, chanUpdateStatus)
+			consensus.drainAndUpdateState(message)
 
-		case message, ok := <-chanUpdateStatus: // Catch any updates signaled during the small window before this select
+		case message, ok := <-chanUpdateStatus:
 			if !ok {
 				log.Warn().Int("nodeId", consensus.GetId()).Msg("chanUpdateStatus closed (unexpectedly here). Exiting.")
 				return
@@ -322,7 +331,7 @@ func (consensus *PBFTStateConsensus) MsgHandlerGoroutine(chanUpdateStatus chan B
 				consensus.drainAndUpdateState(message)
 			}
 
-		case channel, ok := <-toKill: // Re-check toKill, as it's the highest priority
+		case channel, ok := <-toKill:
 			if !ok {
 				log.Info().Int("nodeId", consensus.GetId()).Msg("Kill channel closed during main select. Goroutine exiting.")
 				return
@@ -330,51 +339,43 @@ func (consensus *PBFTStateConsensus) MsgHandlerGoroutine(chanUpdateStatus chan B
 			log.Info().Int("nodeId", consensus.GetId()).Msg("Message handler goroutine shutting down on signal (main select).")
 			channel <- struct{}{}
 			return
-			// default: // Optional: Add a small sleep if all channels are consistently empty to prevent busy-waiting CPU spin
+			// default:
 			// time.Sleep(1 * time.Millisecond)
 		}
 	}
 }
 
-// handleOneMsg processes a single received message.
 func (consensus *PBFTStateConsensus) handleOneMsg(message Blockchain.Message, chanUpdateStatus chan<- Blockchain.Message) {
-	consensus.receivedMessage(message) // Process the message based on its type
+	consensus.receivedMessage(message)
 	select {
-	case chanUpdateStatus <- message: // Signal state update check
+	case chanUpdateStatus <- message:
 	default:
+		log.Warn().Str("type", message.Flag.String()).Msg("chanUpdateStatus full during handleOneMsg, signal potentially dropped.")
 	}
 }
 
-// updateStatusWithMsg checks if the last processed message triggered a state change.
 func (consensus *PBFTStateConsensus) updateStatusWithMsg(message Blockchain.Message) {
 	for {
 		currentState := consensus.state
 		currentSeqNb := consensus.GetSeqNb()
-
-		// Pass the triggering message to giveMeNext
 		nextPayload := consensus.stateFonct.giveMeNext(&message)
 
 		if nextPayload != nil {
 			emittedMsg := consensus.stateFonct.update(nextPayload)
 			consensus.stateFonct = consensus.updateStateFct()
 			if emittedMsg != nil {
-				// If update emitted a message, use it for the next potential state check within this loop iteration
 				message = *emittedMsg
 			} else {
-				// If no message was emitted, clear the message variable to prevent re-processing
 				message = Blockchain.Message{}
 			}
 		}
 
-		// Check if state or sequence number changed, or if no payload was ready
 		if consensus.state == currentState && consensus.GetSeqNb() == currentSeqNb && nextPayload == nil {
-			break // No state/seq change and nothing new ready, exit the inner loop
+			break
 		}
-		// If state/seq changed or a payload was generated, loop again to check the *new* state immediately
 	}
 }
 
-// updateStateFct returns the stateInterf implementation for the current consensus state.
 func (consensus *PBFTStateConsensus) updateStateFct() stateInterf {
 	switch consensus.state {
 	case NewRoundSt:
@@ -391,28 +392,22 @@ func (consensus *PBFTStateConsensus) updateStateFct() stateInterf {
 	case NVRoundSt:
 		return &NewRoundNV{consensus}
 	case FinalCommittedSt:
-		log.Error().Msg("Attempted to get state function for FinalCommittedSt. Should have transitioned already.")
-		// This indicates a logic error, transition immediately to the next state.
+		log.Debug().Int("nodeId", consensus.GetId()).Msg("FinalCommittedSt: Transitioning to next state after commit.") // Changed to Debug
 		consensus.updateStateAfterCommit()
-		return consensus.updateStateFct() // Recursively call to get the correct next state handler
+		return consensus.updateStateFct()
 	default:
 		log.Error().Msgf("Unknown State %d encountered in updateStateFct", consensus.state)
-		// Return NewRound handler as a safe default fallback
 		return &NewRound{consensus}
 	}
 }
 
-// receivedMessage directs incoming messages to specific handlers based on type.
-// NO LONGER includes workaround for Dealer's SDN Transaction.
 func (consensus *PBFTStateConsensus) receivedMessage(message Blockchain.Message) {
 	consensus.logTrace(message, consensus.isActiveValidator())
-
-	// Standard message routing for actual PBFT messages
 	switch message.Flag {
 	case Blockchain.TransactionMess:
-		consensus.receiveTransacMess(message) // Process the message based on its type
+		consensus.receiveTransacMess(message)
 	case Blockchain.PrePrepare:
-		consensus.receivePrePrepareMessage(message) // Replica call logic is inside here
+		consensus.receivePrePrepareMessage(message)
 	case Blockchain.PrepareMess:
 		consensus.receivePrepareMessage(message)
 	case Blockchain.CommitMess:
@@ -421,59 +416,57 @@ func (consensus *PBFTStateConsensus) receivedMessage(message Blockchain.Message)
 		consensus.receiveRCMessage(message)
 	case Blockchain.BlocMsg:
 		consensus.receiveBlockMsg(message)
-	// --- ADDED CASE ---
 	case Blockchain.ConsensusResultMess:
-		// This message type is expected by the Dealer, not a PBFT Node for consensus logic.
-		// Nodes should not typically receive this unless for testing or specific architecture.
-		log.Warn().Str("type", message.Flag.String()).Msg("Received ConsensusResultMess, which is unexpected for a PBFT node in consensus.")
-		// --- END ADDED CASE ---
+		log.Warn().Str("type", message.Flag.String()).Msg("Received ConsensusResultMess, which is unexpected for a PBFT node in consensus logic.")
 	default:
 		log.Warn().Msgf("Unrecognized Message Type: %d", message.Flag)
 	}
 }
-
-// receiveTransacMess handles adding regular transactions to the pool (called by transactionHandler).
 func (consensus *PBFTStateConsensus) receiveTransacMess(message Blockchain.Message) {
-	transac, castOk := message.Data.(Blockchain.Transaction) // Check cast explicitly
+	transac, castOk := message.Data.(Blockchain.Transaction)
 	if !castOk {
 		log.Error().Str("type", message.Flag.String()).Msg("Received TransactionMess flag but data is not Transaction type.")
-		return // Drop message if cast fails
+		return
 	}
 
-	// Add detailed logging for validation checks
-	isValidSender := consensus.acceptUnknownTx || consensus.Validators.IsValidator(message.Data.GetProposer())
+	isKnownSender := consensus.Validators.IsValidator(message.Data.GetProposer()) ||
+		bytes.Equal(message.Data.GetProposer(), consensus.knownDealerPubKey)
+	isValidSender := consensus.acceptUnknownTx || isKnownSender
+
 	isNew := !consensus.TransactionPool.ExistingTransaction(transac) && !consensus.BlockChain.ExistTx(transac.Hash)
 	isVerified := transac.VerifyTransaction()
-	isCommandValid := !transac.IsCommand() || transac.VerifyAsCommandShort(consensus.Validators) // Note: SdnControlInput is NOT a command, so this is true for SDN tx
+
+	isCommandValid := true
+	if transac.IsCommand() { // Only call VerifyAsCommandShort if it's actually a command
+		isCommandValid = transac.VerifyAsCommandShort(consensus.Validators)
+	}
 
 	log.Debug().Str("txHash", transac.GetHashPayload()).
 		Bool("isValidSender", isValidSender).
 		Bool("isNew", isNew).
 		Bool("isVerified", isVerified).
-		Bool("isCommandValid", isCommandValid).
+		Bool("isCommandValidOrNotCmd", isCommandValid). // Renamed for clarity
 		Msg("receiveTransacMess: Validation checks.")
 
 	if isValidSender && isNew && isVerified && isCommandValid {
 		log.Debug().Str("txHash", transac.GetHashPayload()).Msg("receiveTransacMess: Validation checks passed, calling ReceiveTrustedMess.")
-		consensus.ReceiveTrustedMess(message) // Validate and add to pool
+		consensus.ReceiveTrustedMess(message)
 	} else {
-		// Log why it failed more clearly
 		if !isValidSender {
 			log.Warn().Str("tx", transac.GetHashPayload()).Msg("receiveTransacMess: Validation failed - Sender invalid or not accepted.")
 		}
-		if !isNew {
+		if !isNew { // This is normal if transaction was already processed. Use Debug.
 			log.Debug().Str("tx", transac.GetHashPayload()).Msg("receiveTransacMess: Validation failed - Transaction already processed or in pool.")
 		}
 		if !isVerified {
 			log.Warn().Str("tx", transac.GetHashPayload()).Msg("receiveTransacMess: Validation failed - Transaction signature verification failed.")
 		}
-		// isCommandValid failure is logged by VerifyAsCommandShort if it returns false
+		// isCommandValid failure is logged by VerifyAsCommandShort
 	}
 }
 
-// ReceiveTrustedMess adds a validated transaction to the pool and handles broadcasting/forwarding.
 func (consensus *PBFTStateConsensus) ReceiveTrustedMess(message Blockchain.Message) {
-	transac, ok := message.Data.(Blockchain.Transaction) // Assume cast is safe here based on caller
+	transac, ok := message.Data.(Blockchain.Transaction)
 	if !ok {
 		log.Error().Str("type", message.Flag.String()).Msg("ReceiveTrustedMess called with non-Transaction data.")
 		return
@@ -481,7 +474,7 @@ func (consensus *PBFTStateConsensus) ReceiveTrustedMess(message Blockchain.Messa
 	log.Debug().Str("txHash", transac.GetHashPayload()).Msg("ReceiveTrustedMess: Calling TransactionPool.AddTransaction.")
 	success := consensus.TransactionPool.AddTransaction(transac)
 	if !success {
-		log.Warn().Str("tx", transac.GetHashPayload()).Msg("ReceiveTrustedMess: Transaction pool rejected transaction (likely full).")
+		log.Warn().Str("tx", transac.GetHashPayload()).Msg("ReceiveTrustedMess: Transaction pool rejected transaction (likely full or duplicate).")
 		return
 	}
 	log.Debug().Str("txHash", transac.GetHashPayload()).Msg("ReceiveTrustedMess: TransactionPool.AddTransaction returned success.")
@@ -490,22 +483,20 @@ func (consensus *PBFTStateConsensus) ReceiveTrustedMess(message Blockchain.Messa
 	isFromDealer := bytes.Equal(senderPubKey, consensus.knownDealerPubKey)
 
 	if isFromDealer {
-		log.Debug().Str("txHash", transac.GetHashPayload()).Msg("ReceiveTrustedMess: Transaction is from Dealer, added to pool. Will be included in next block if Proposer.")
-		// No immediate broadcast/forwarding needed for transactions directly from the dealer.
+		log.Debug().Str("txHash", transac.GetHashPayload()).Msg("ReceiveTrustedMess: Transaction is from Dealer, added to pool.")
 	} else if message.ToBroadcast == Blockchain.AskToBroadcast {
 		log.Debug().Str("txHash", transac.GetHashPayload()).Msg("ReceiveTrustedMess: Transaction from peer (AskToBroadcast), broadcasting.")
 		consensus.SocketHandler.BroadcastMessage(Blockchain.Message{
 			Flag:        Blockchain.TransactionMess,
 			Data:        transac,
-			ToBroadcast: Blockchain.DontBroadcast, // Prevent loops
+			ToBroadcast: Blockchain.DontBroadcast,
 			Priority:    message.Priority,
 		})
 	} else if (message.ToBroadcast == Blockchain.DefaultBehaviour) && !consensus.IsProposer() {
 		log.Debug().Str("txHash", transac.GetHashPayload()).Msg("ReceiveTrustedMess: Transaction from peer (DefaultBehaviour), forwarding to Proposer.")
-		consensus.SocketHandler.TransmitTransaction(message) // Forward to proposer
+		consensus.SocketHandler.TransmitTransaction(message)
 	} else {
-		// If from peer, DefaultBehaviour, and we ARE the proposer, also just add to pool.
-		log.Debug().Str("txHash", transac.GetHashPayload()).Msg("ReceiveTrustedMess: Transaction from peer (DefaultBehaviour), already Proposer, added to pool.")
+		log.Debug().Str("txHash", transac.GetHashPayload()).Msg("ReceiveTrustedMess: Transaction from peer (DefaultBehaviour), already Proposer (or not broadcasting), added to pool.")
 	}
 }
 
@@ -515,7 +506,6 @@ func (consensus *PBFTStateConsensus) receivePrePrepareMessage(message Blockchain
 		log.Error().Msg("Invalid data type for PrePrepare message.")
 		return
 	}
-
 	log.Debug().Int("seqNb", block.SequenceNb).Str("hash", block.GetHashPayload()).Msg("Received PrePrepare in receivePrePrepareMessage.")
 
 	isValid := consensus.BlockChain.IsValidNewBlock(block)
@@ -523,92 +513,79 @@ func (consensus *PBFTStateConsensus) receivePrePrepareMessage(message Blockchain
 	log.Debug().Bool("isNew", isNew).Bool("isValid", isValid).Int("seqNb", block.SequenceNb).Msg("receivePrePrepareMessage: Checking PrePrepare basic validation.")
 
 	if isNew && isValid {
-		log.Debug().Int("seqNb", block.SequenceNb).Msg("receivePrePrepareMessage: Basic validation passed (isNew && isValid). Starting SDN validation.")
+		log.Debug().Int("seqNb", block.SequenceNb).Msg("receivePrePrepareMessage: Basic validation passed. Starting SDN/Link validation.")
 
-		// --- SDN Validation Step ---
-		sdnValidationPassed := true
-		for _, tx := range block.Transactions {
-			log.Trace().Str("txHash", tx.GetHashPayload()).Msg("receivePrePrepareMessage: Checking transaction for SDN input for validation.")
+		sdnOrLinkValidationPassed := true
+		for i, tx := range block.Transactions {
+			log.Trace().Str("txHash", tx.GetHashPayload()).Int("txIndex", i).Msg("receivePrePrepareMessage: Checking transaction for SDN/Link input.")
+
+			// Check for SdnControlInput
 			if sdnInput, isSdn := tx.TransaCore.Input.(Blockchain.SdnControlInput); isSdn {
-				log.Info().Int("seqNb", block.SequenceNb).Str("txHash", tx.GetHashPayload()).Msg("receivePrePrepareMessage: SDN transaction found, calling replica...")
+				log.Info().Int("seqNb", block.SequenceNb).Str("txHash", tx.GetHashPayload()).Msg("receivePrePrepareMessage: SdnControlInput transaction found, calling replica...")
 				if consensus.replicaClient != nil {
-					// --- Use Background context for testing ---
-					ctx := context.Background()
-
+					ctx, cancel := context.WithTimeout(context.Background(), ReplicaTimeout)
+					defer cancel()
 					req := &pbftconsensus.CalculateActionRequest{PacketInfo: sdnInput.PacketInfo}
-
-					callStartTime := time.Now()
-					log.Debug().Int("seqNb", block.SequenceNb).Str("txHash", tx.GetHashPayload()).Msg("receivePrePrepareMessage: >>> Calling replicaClient.CalculateAction...")
-
 					resp, err := consensus.replicaClient.CalculateAction(ctx, req)
-
-					callDuration := time.Since(callStartTime)
 					if err != nil {
-						log.Error().Err(err).Dur("duration", callDuration).Int("seqNb", block.SequenceNb).Str("txHash", tx.GetHashPayload()).Msg("receivePrePrepareMessage: <<< replicaClient.CalculateAction returned ERROR")
-						sdnValidationPassed = false
-						break // Stop validating this block on error
+						detailedStatus, _ := status.FromError(err)
+						log.Error().Err(err).Str("grpc_status_code", detailedStatus.Code().String()).Str("grpc_status_message", detailedStatus.Message()).
+							Int("seqNb", block.SequenceNb).Str("txHash", tx.GetHashPayload()).Msg("receivePrePrepareMessage: replicaClient.CalculateAction returned ERROR")
+						sdnOrLinkValidationPassed = false
+						break
 					} else if resp == nil || resp.ComputedAction == nil {
-						log.Error().Dur("duration", callDuration).Int("seqNb", block.SequenceNb).Str("txHash", tx.GetHashPayload()).Msg("receivePrePrepareMessage: <<< replicaClient.CalculateAction returned nil response/action")
-						sdnValidationPassed = false
-						break // Stop validating this block on nil response
+						log.Error().Int("seqNb", block.SequenceNb).Str("txHash", tx.GetHashPayload()).Msg("receivePrePrepareMessage: replicaClient.CalculateAction returned nil response/action")
+						sdnOrLinkValidationPassed = false
+						break
 					} else {
-						log.Info().Dur("duration", callDuration).Int("seqNb", block.SequenceNb).Str("txHash", tx.GetHashPayload()).Msg("receivePrePrepareMessage: <<< replicaClient.CalculateAction returned SUCCESS")
-						// Optional: Compare JSON strings - This comparison logic is already there, logging WARN if mismatch
-						// If you uncomment the sdnValidationPassed = false here, mismatches will cause validation failure.
+						log.Info().Int("seqNb", block.SequenceNb).Str("txHash", tx.GetHashPayload()).Msg("receivePrePrepareMessage: replicaClient.CalculateAction returned SUCCESS")
 						if sdnInput.ProposedActionJson != resp.ComputedAction.ActionJson {
 							log.Warn().Int("seqNb", block.SequenceNb).Str("txHash", tx.GetHashPayload()).
 								Str("proposed", sdnInput.ProposedActionJson).
 								Str("computed", resp.ComputedAction.ActionJson).
-								Msg("receivePrePrepareMessage: Replica computed action differs from proposed action")
-							// sdnValidationPassed = false // Uncomment to fail on mismatch
-							// break                   // Uncomment to fail on mismatch
+								Msg("receivePrePrepareMessage: Replica computed action differs from proposed SDN action. Block will NOT be rejected by this node based on this mismatch alone (current policy).")
+							// sdnOrLinkValidationPassed = false // To fail on mismatch, uncomment this
+							// break
 						} else {
-							log.Debug().Int("seqNb", block.SequenceNb).Str("txHash", tx.GetHashPayload()).Msg("receivePrePrepareMessage: Replica action matches proposed action.") // Use Debug for less noise
+							log.Debug().Int("seqNb", block.SequenceNb).Str("txHash", tx.GetHashPayload()).Msg("receivePrePrepareMessage: Replica action matches proposed SDN action.")
 						}
 					}
-
 				} else {
-					log.Warn().Int("seqNb", block.SequenceNb).Str("txHash", tx.GetHashPayload()).Msg("receivePrePrepareMessage: Received SDN transaction but no replica client configured. Cannot validate.")
-					sdnValidationPassed = false // ADD THIS LINE if SDN validation is mandatory
-					break                       // Exit loop if validation is mandatory but impossible
+					log.Warn().Int("seqNb", block.SequenceNb).Str("txHash", tx.GetHashPayload()).Msg("receivePrePrepareMessage: Received SdnControlInput transaction but no replica client configured. Cannot validate SDN action.")
+					// sdnOrLinkValidationPassed = false // Uncomment if SDN validation is strictly mandatory
+					// break
 				}
+			} else if _, isLink := tx.TransaCore.Input.(Blockchain.LinkEventInput); isLink {
+				// For LinkEventInput, there's no explicit validation against a replica here.
+				// The primary has reported it, and PBFT ensures all nodes agree on this report.
+				// The validation is that it's a validly formed transaction from the dealer.
+				log.Info().Int("seqNb", block.SequenceNb).Str("txHash", tx.GetHashPayload()).Msg("receivePrePrepareMessage: LinkEventInput transaction found. Accepted as part of block proposal.")
 			} else {
-				log.Trace().Str("txHash", tx.GetHashPayload()).Msgf("receivePrePrepareMessage: Transaction is not SdnControlInput, type is %T. Skipping SDN validation for this transaction.", tx.TransaCore.Input)
+				log.Trace().Str("txHash", tx.GetHashPayload()).Msgf("receivePrePrepareMessage: Transaction is not SdnControlInput or LinkEventInput, type is %T. Skipping specific validation.", tx.TransaCore.Input)
 			}
 		}
-		// --- /SDN Validation Step ---
 
-		if !sdnValidationPassed { // <-- This check determines if the block is processed
-			log.Warn().Int("seqNb", block.SequenceNb).Str("hash", block.GetHashPayload()).Msg("receivePrePrepareMessage: PrePrepare failed SDN validation step.")
-			return // Do not add to pool or broadcast
+		if !sdnOrLinkValidationPassed {
+			log.Warn().Int("seqNb", block.SequenceNb).Str("hash", block.GetHashPayload()).Msg("receivePrePrepareMessage: PrePrepare failed specific transaction validation step (SDN/Link).")
+			return
 		}
 
-		// Add block to pool if validation passes
 		consensus.BlockPool.AddBlock(block)
 		log.Debug().Int("seqNb", block.SequenceNb).Str("hash", block.GetHashPayload()).Msg("receivePrePrepareMessage: PrePrepare passed validation, added block to BlockPool.")
-
-		// Re-broadcast PrePrepare only if it's a real one and configured
 		if consensus.Broadcast {
 			log.Debug().Int("seqNb", block.SequenceNb).Msg("receivePrePrepareMessage: Broadcasting PrePrepare.")
 			consensus.SocketHandler.BroadcastMessage(message)
 		}
-
-		// Trigger state update check
 		select {
 		case consensus.chanUpdateStatus <- message:
-			log.Debug().Int("seqNb", block.SequenceNb).Msg("receivePrePrepareMessage: Sent update status signal.")
 		default:
 			log.Warn().Int("seqNb", block.SequenceNb).Msg("receivePrePrepareMessage: Failed to send update status signal (channel full).")
 		}
-
 	} else {
-		// Log why it was dropped
 		log.Warn().Bool("isNew", isNew).Bool("isValid", isValid).Int("seqNb", block.SequenceNb).Msg("receivePrePrepareMessage: PrePrepare dropped (isNew && isValid check failed).")
-		// More specific logs moved inside the if block above
 	}
 }
 
-// receivePrepareMessage handles incoming Prepare messages.
 func (consensus *PBFTStateConsensus) receivePrepareMessage(message Blockchain.Message) {
 	prepare, ok := message.Data.(Blockchain.Prepare)
 	if !ok {
@@ -643,13 +620,11 @@ func (consensus *PBFTStateConsensus) receivePrepareMessage(message Blockchain.Me
 
 	select {
 	case consensus.chanUpdateStatus <- message:
-		log.Debug().Str("hash", prepare.GetHashPayload()).Msg("receivePrepareMessage: Sent update status signal.")
 	default:
 		log.Warn().Str("hash", prepare.GetHashPayload()).Msg("receivePrepareMessage: Failed to send update status signal (channel full).")
 	}
 }
 
-// receiveCommitMessage handles incoming Commit messages.
 func (consensus *PBFTStateConsensus) receiveCommitMessage(message Blockchain.Message) {
 	commit, ok := message.Data.(Blockchain.Commit)
 	if !ok {
@@ -683,13 +658,11 @@ func (consensus *PBFTStateConsensus) receiveCommitMessage(message Blockchain.Mes
 
 	select {
 	case consensus.chanUpdateStatus <- message:
-		log.Debug().Str("hash", commit.GetHashPayload()).Msg("receiveCommitMessage: Sent update status signal.")
 	default:
 		log.Warn().Str("hash", commit.GetHashPayload()).Msg("receiveCommitMessage: Failed to send update status signal (channel full).")
 	}
 }
 
-// receiveRCMessage handles incoming RoundChange messages (currently basic).
 func (consensus *PBFTStateConsensus) receiveRCMessage(message Blockchain.Message) {
 	round, ok := message.Data.(Blockchain.RoundChange)
 	if !ok {
@@ -714,16 +687,13 @@ func (consensus *PBFTStateConsensus) receiveRCMessage(message Blockchain.Message
 		log.Debug().Str("hash", round.GetHashPayload()).Msg("receiveRCMessage: Broadcasting RoundChange.")
 		consensus.SocketHandler.BroadcastMessage(message)
 	}
-
 	select {
 	case consensus.chanUpdateStatus <- message:
-		log.Debug().Str("hash", round.GetHashPayload()).Msg("receiveRCMessage: Sent update status signal.")
 	default:
 		log.Warn().Str("hash", round.GetHashPayload()).Msg("receiveRCMessage: Failed to send update status signal (channel full).")
 	}
 }
 
-// receiveBlockMsg handles BlockMsg for non-validators in PoA mode.
 func (consensus *PBFTStateConsensus) receiveBlockMsg(message Blockchain.Message) {
 	blockMsg, ok := message.Data.(Blockchain.BlockMsg)
 	if !ok {
@@ -731,11 +701,10 @@ func (consensus *PBFTStateConsensus) receiveBlockMsg(message Blockchain.Message)
 		return
 	}
 	block := blockMsg.Block
-
 	log.Debug().Int("SeqNb", block.SequenceNb).Str("hash", block.GetHashPayload()).Msg("Received BlockMsg in receiveBlockMsg.")
 
 	isNext := consensus.BlockChain.GetCurrentSeqNb()+1 == block.SequenceNb
-	isValid := block.VerifyBlock() // This should already pass checks like signature and hash validity
+	isValid := block.VerifyBlock()
 	isNew := !consensus.BlockPoolNV.ExistingBlock(block) && !consensus.BlockChain.ExistBlockOfHash(block.Hash)
 
 	if isNew && isNext && isValid {
@@ -743,7 +712,6 @@ func (consensus *PBFTStateConsensus) receiveBlockMsg(message Blockchain.Message)
 		log.Debug().Int("SeqNb", block.SequenceNb).Str("hash", block.GetHashPayload()).Msg("receiveBlockMsg: Added BlockMsg to NV pool.")
 		select {
 		case consensus.chanUpdateStatus <- message:
-			log.Debug().Int("SeqNb", block.SequenceNb).Msg("receiveBlockMsg: Sent update status signal.")
 		default:
 			log.Warn().Int("SeqNb", block.SequenceNb).Msg("receiveBlockMsg: Failed to send update status signal (channel full).")
 		}
@@ -760,7 +728,6 @@ func (consensus *PBFTStateConsensus) receiveBlockMsg(message Blockchain.Message)
 	}
 }
 
-// updateStateAfterCommit determines the next state after a block has been committed.
 func (consensus *PBFTStateConsensus) updateStateAfterCommit() {
 	if consensus.IsPoANV() && !consensus.isActiveValidator() {
 		consensus.updateState(NVRoundSt)
@@ -771,7 +738,6 @@ func (consensus *PBFTStateConsensus) updateStateAfterCommit() {
 	}
 }
 
-// Close gracefully shuts down the consensus engine and associated resources.
 func (consensus *PBFTStateConsensus) Close() {
 	log.Info().Int("nodeId", consensus.GetId()).Msg("Closing PBFT State Consensus...")
 	if consensus.Metrics != nil {
@@ -785,37 +751,38 @@ func (consensus *PBFTStateConsensus) Close() {
 
 	if consensus.toKill != nil {
 		query := make(chan struct{})
+		// Non-blocking send to toKill to prevent deadlock if MsgHandlerGoroutine already exited
 		select {
 		case consensus.toKill <- query:
-			select {
+			select { // Wait for acknowledgment with timeout
 			case <-query:
 				log.Debug().Msg("Message handler goroutine acknowledged shutdown.")
 			case <-time.After(2 * time.Second):
 				log.Warn().Msg("Timeout waiting for message handler goroutine ack.")
 			}
-		case <-time.After(1 * time.Second):
-			log.Warn().Msg("Timeout sending close signal to message handler goroutine.")
+		case <-time.After(1 * time.Second): // Timeout if MsgHandlerGoroutine is stuck
+			log.Warn().Msg("Timeout sending close signal to message handler goroutine (already exited or stuck).")
 		}
+		// Close toKill only after attempting to send and potentially receive ack.
+		// It's safe to close multiple times, but good practice to do it once.
+		// Check if it's already closed before closing.
+		// For simplicity, we assume it's not closed by another path.
 		close(consensus.toKill)
-		consensus.toKill = nil
+		consensus.toKill = nil // Nil out to prevent further use
 	}
-
 	log.Info().Int("nodeId", consensus.GetId()).Msg("PBFT State Consensus closed.")
 }
 
-// GetIncQueueSize returns the approximate number of messages waiting in the input queues.
 func (consensus PBFTStateConsensus) GetIncQueueSize() int {
 	return len(consensus.chanReceivMsg) + len(consensus.chanPrioInMsg) + len(consensus.chanTxMsg)
 }
 
-// GenerateNewValidatorListProposition uses the configured selector strategy to propose a new validator set.
 func (consensus PBFTStateConsensus) GenerateNewValidatorListProposition(newSize int) []ed25519.PublicKey {
 	seedByte := consensus.GetBlockchain().GetLastBLoc().Hash
 	var seed int64 = 0
 	if len(seedByte) >= 8 {
 		seed = int64(binary.BigEndian.Uint64(seedByte[:8]))
 	} else if len(seedByte) > 0 {
-		// Use whatever bytes are available, pad with 0s if needed for int64
 		var temp [8]byte
 		copy(temp[:], seedByte)
 		seed = int64(binary.BigEndian.Uint64(temp[:]))
@@ -823,6 +790,52 @@ func (consensus PBFTStateConsensus) GenerateNewValidatorListProposition(newSize 
 	} else {
 		log.Warn().Msg("Last block hash is empty (genesis?), using 0 for seed.")
 	}
-
 	return consensus.selector.GenerateNewValidatorListProposition(consensus.Validators, newSize, seed)
+}
+
+// notifyReplicaOfLinkEvent is called when a LinkEventInput transaction is committed.
+func (consensus *PBFTStateConsensus) notifyReplicaOfLinkEvent(linkEventInput Blockchain.LinkEventInput) {
+	if consensus.replicaClient == nil {
+		log.Warn().Str("txInputType", "LinkEventInput").Msg("Cannot notify replica: replicaClient is nil.")
+		return
+	}
+
+	log.Info().Int("nodeId", consensus.GetId()).
+		Msgf("Committed LinkEventInput. Notifying replica: %s:%d <-> %s:%d is %s",
+			linkEventInput.Dpid1, linkEventInput.Port1, linkEventInput.Dpid2, linkEventInput.Port2, linkEventInput.Status)
+
+	// Convert status string from LinkEventInput to proto enum
+	var linkStatusProto pbftconsensus.LinkEventInfo_LinkStatus
+	switch strings.ToUpper(linkEventInput.Status) { // Use ToUpper for case-insensitivity
+	case "LINK_UP":
+		linkStatusProto = pbftconsensus.LinkEventInfo_LINK_UP
+	case "LINK_DOWN":
+		linkStatusProto = pbftconsensus.LinkEventInfo_LINK_DOWN
+	default:
+		linkStatusProto = pbftconsensus.LinkEventInfo_LINK_STATUS_UNSPECIFIED // Default if string is unrecognized
+		log.Warn().Str("status", linkEventInput.Status).Msg("Unknown link status string in committed LinkEventInput transaction, sending UNSPECIFIED to replica.")
+	}
+
+	linkEventProto := &pbftconsensus.LinkEventInfo{
+		Dpid1:       linkEventInput.Dpid1,
+		Port1:       linkEventInput.Port1,
+		Dpid2:       linkEventInput.Dpid2,
+		Port2:       linkEventInput.Port2,
+		Status:      linkStatusProto,
+		TimestampNs: linkEventInput.TimestampNs, // Pass along the timestamp
+	}
+
+	// Call replica in a goroutine to avoid blocking main consensus flow
+	go func(client pbftconsensus.RyuReplicaLogicClient, event *pbftconsensus.LinkEventInfo) {
+		ctx, cancel := context.WithTimeout(context.Background(), ReplicaTimeout) // Use defined timeout
+		defer cancel()
+		_, err := client.NotifyLinkEvent(ctx, event)
+		if err != nil {
+			detailedStatus, _ := status.FromError(err)
+			log.Error().Err(err).Str("grpc_status_code", detailedStatus.Code().String()).Str("grpc_status_message", detailedStatus.Message()).
+				Msgf("Failed to notify replica about link event: %v", event)
+		} else {
+			log.Debug().Msgf("Successfully notified replica about link event: %v", event)
+		}
+	}(consensus.replicaClient, linkEventProto)
 }

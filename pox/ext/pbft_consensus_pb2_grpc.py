@@ -3,6 +3,7 @@
 import grpc
 import warnings
 
+from google.protobuf import empty_pb2 as google_dot_protobuf_dot_empty__pb2
 import pbft_consensus_pb2 as pbft__consensus__pb2
 
 GRPC_GENERATED_VERSION = '1.71.0'
@@ -40,6 +41,11 @@ class PBFTConsensusStub(object):
                 request_serializer=pbft__consensus__pb2.ConsensusRequest.SerializeToString,
                 response_deserializer=pbft__consensus__pb2.ConsensusResponse.FromString,
                 _registered_method=True)
+        self.ReportLinkEvent = channel.unary_unary(
+                '/pbftconsensus.PBFTConsensus/ReportLinkEvent',
+                request_serializer=pbft__consensus__pb2.LinkEventInfo.SerializeToString,
+                response_deserializer=google_dot_protobuf_dot_empty__pb2.Empty.FromString,
+                _registered_method=True)
 
 
 class PBFTConsensusServicer(object):
@@ -47,7 +53,14 @@ class PBFTConsensusServicer(object):
     """
 
     def RequestConsensus(self, request, context):
-        """Ryu Primary calls this to initiate consensus
+        """Ryu Primary calls this to initiate consensus on an SDN action for a packet
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ReportLinkEvent(self, request, context):
+        """Ryu Primary calls this to report a link event to be disseminated via PBFT
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -60,6 +73,11 @@ def add_PBFTConsensusServicer_to_server(servicer, server):
                     servicer.RequestConsensus,
                     request_deserializer=pbft__consensus__pb2.ConsensusRequest.FromString,
                     response_serializer=pbft__consensus__pb2.ConsensusResponse.SerializeToString,
+            ),
+            'ReportLinkEvent': grpc.unary_unary_rpc_method_handler(
+                    servicer.ReportLinkEvent,
+                    request_deserializer=pbft__consensus__pb2.LinkEventInfo.FromString,
+                    response_serializer=google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -100,6 +118,33 @@ class PBFTConsensus(object):
             metadata,
             _registered_method=True)
 
+    @staticmethod
+    def ReportLinkEvent(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/pbftconsensus.PBFTConsensus/ReportLinkEvent',
+            pbft__consensus__pb2.LinkEventInfo.SerializeToString,
+            google_dot_protobuf_dot_empty__pb2.Empty.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
 
 class RyuReplicaLogicStub(object):
     """The service definition for the Ryu Replicas
@@ -116,6 +161,11 @@ class RyuReplicaLogicStub(object):
                 request_serializer=pbft__consensus__pb2.CalculateActionRequest.SerializeToString,
                 response_deserializer=pbft__consensus__pb2.CalculateActionResponse.FromString,
                 _registered_method=True)
+        self.NotifyLinkEvent = channel.unary_unary(
+                '/pbftconsensus.RyuReplicaLogic/NotifyLinkEvent',
+                request_serializer=pbft__consensus__pb2.LinkEventInfo.SerializeToString,
+                response_deserializer=google_dot_protobuf_dot_empty__pb2.Empty.FromString,
+                _registered_method=True)
 
 
 class RyuReplicaLogicServicer(object):
@@ -123,7 +173,14 @@ class RyuReplicaLogicServicer(object):
     """
 
     def CalculateAction(self, request, context):
-        """PBFT Node calls this to get deterministic action from a replica
+        """PBFT Node calls this to get deterministic action from a replica for a packet
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def NotifyLinkEvent(self, request, context):
+        """PBFT Node calls this to notify the replica of a consensus-agreed link event
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -136,6 +193,11 @@ def add_RyuReplicaLogicServicer_to_server(servicer, server):
                     servicer.CalculateAction,
                     request_deserializer=pbft__consensus__pb2.CalculateActionRequest.FromString,
                     response_serializer=pbft__consensus__pb2.CalculateActionResponse.SerializeToString,
+            ),
+            'NotifyLinkEvent': grpc.unary_unary_rpc_method_handler(
+                    servicer.NotifyLinkEvent,
+                    request_deserializer=pbft__consensus__pb2.LinkEventInfo.FromString,
+                    response_serializer=google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -166,6 +228,33 @@ class RyuReplicaLogic(object):
             '/pbftconsensus.RyuReplicaLogic/CalculateAction',
             pbft__consensus__pb2.CalculateActionRequest.SerializeToString,
             pbft__consensus__pb2.CalculateActionResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def NotifyLinkEvent(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/pbftconsensus.RyuReplicaLogic/NotifyLinkEvent',
+            pbft__consensus__pb2.LinkEventInfo.SerializeToString,
+            google_dot_protobuf_dot_empty__pb2.Empty.FromString,
             options,
             channel_credentials,
             insecure,

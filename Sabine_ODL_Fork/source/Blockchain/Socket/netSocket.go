@@ -3,10 +3,11 @@ package Socket
 import (
 	"crypto/ed25519"
 	"encoding/gob"
-	"github.com/rs/zerolog/log"
 	"net"
 	"pbftnode/source/Blockchain"
 	"sync"
+
+	"github.com/rs/zerolog/log"
 )
 
 const (
@@ -81,6 +82,7 @@ func GobLoader() {
 	gob.Register(ed25519.PublicKey{})
 	gob.Register(Blockchain.SdnControlInput{})
 	gob.Register(Blockchain.ConsensusResult{})
+	gob.Register(Blockchain.LinkEventInput{})
 }
 
 func (netsock *NetSocket) serverLoop() {
