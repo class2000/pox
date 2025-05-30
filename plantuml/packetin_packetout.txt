@@ -1,0 +1,68 @@
+@startuml
+!theme vibrant
+skinparam sequenceArrowThickness 2
+skinparam roundcorner 10
+skinparam maxmessagesize 300
+skinparam sequenceParticipant đậm #SkyBlue
+skinparam sequenceLifeLineBorderColor #DarkSlateGray
+skinparam sequenceGroupBodyBackgroundColor #AliceBlue
+
+title BFT-SDN: Packet Processing (Packet-In to Packet-Out)
+
+actor UserDevice
+participant Switch as SW
+participant "POX Primary\n(PoxPbftApp)" as POX_P
+participant "PBFT Dealer" as DEALER
+collections "PBFT Nodes (N)" as PBFT_NODES
+participant "POX Replica X\n(DeterministicLogic)" as POX_R_X
+participant "POX Replica Y\n(DeterministicLogic)" as POX_R_Y
+
+
+group Packet Arrival and Initial Processing by Primary
+    UserDevice -> SW: Sends Data Packet
+    SW -> POX_P: OFPT_PACKET_IN (No matching flow)
+    POX_P -> POX_P: Computes ProposedAction (using its DeterministicL2SwitchLogic)
+    POX_P -> DEALER: gRPC: RequestConsensus(PacketInfo, ProposedAction)
+end
+
+group Dealer Initiates PBFT for SDN Action
+    DEALER -> DEALER: Creates SdnControlInput PBFT Tx
+    DEALER -> PBFT_NODES: Broadcasts SdnControlInput Transaction (via sender)
+    loop for each PBFT Node
+        PBFT_NODES -> PBFT_NODES: Receives Tx, adds to Pool
+    end
+end
+
+group PBFT Consensus on SDN Action (Validation against Replicas)
+    PBFT_NODES -> PBFT_NODES: Proposer includes SdnControlInput Tx in Block
+    PBFT_NODES -> PBFT_NODES: Broadcasts Pre-Prepare(Block)
+
+    loop for each PBFT Node (e.g., Node X) receiving Pre-Prepare
+        PBFT_NODES -> POX_R_X: gRPC: CalculateAction(PacketInfo from Tx)
+        note right of PBFT_NODES : (Node X queries its Replica X)
+        POX_R_X -> POX_R_X: Computes Action (using its DeterministicL2SwitchLogic)
+        POX_R_X --> PBFT_NODES: gRPC: CalculateActionResponse(ComputedAction)
+        PBFT_NODES -> PBFT_NODES: Compares ProposedAction (from Tx) with ComputedAction (from Replica)
+        note right of PBFT_NODES: (Currently logs warning on mismatch)
+    end
+    note over PBFT_NODES: (Similar validation happens at other nodes with their replicas)
+
+    PBFT_NODES <-> PBFT_NODES: PBFT Consensus Continues (Prepare, Commit phases)
+end
+
+group Block Commit and Result Notification to Dealer
+    loop for each PBFT Node that commits the block
+        PBFT_NODES -> PBFT_NODES: Extracts SdnControlInput from committed block
+        PBFT_NODES -> DEALER: TCP: ConsensusResultMess(TxHash, FinalAction=ProposedAction, Success=true)
+        note right of PBFT_NODES: (Node sends result via its direct TCP conn to Dealer's IncomePort)
+    end
+end
+
+group Dealer Responds to Primary, Primary Executes Action
+    DEALER -> DEALER: Matches ConsensusResult to pending gRPC request
+    DEALER --> POX_P: gRPC: ConsensusResponse(FinalAction, ConsensusReached=true)
+    POX_P -> POX_P: Receives response
+    POX_P -> SW: OFPT_PACKET_OUT (based on FinalAction)
+    SW -> UserDevice: Forwards/Floods Packet (or another destination)
+end
+@enduml

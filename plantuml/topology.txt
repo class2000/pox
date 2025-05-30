@@ -1,0 +1,49 @@
+@startuml
+!theme vibrant
+skinparam sequenceArrowThickness 2
+skinparam roundcorner 10
+skinparam maxmessagesize 250
+skinparam sequenceParticipant đậm #SkyBlue
+skinparam sequenceLifeLineBorderColor #DarkSlateGray
+skinparam sequenceGroupBodyBackgroundColor #AliceBlue
+
+title BFT-SDN: Topology Update (Link Event)
+
+actor Switch as SW
+participant "POX Primary\n(openflow.discovery)" as POX_P
+participant "PBFT Dealer" as DEALER
+collections "PBFT Nodes (N)" as PBFT_NODES
+participant "POX Replica X" as POX_R_X
+participant "POX Replica Y" as POX_R_Y
+
+group Link Discovery and Initial Report
+    SW -> POX_P: LLDP Packet / Link State Change
+    POX_P -> POX_P: Handles LinkEvent (e.g., link UP)
+    POX_P -> DEALER: gRPC: ReportLinkEvent(LinkEventInfo)
+    DEALER -> DEALER: Creates LinkEventInput PBFT Tx
+end
+
+group PBFT Consensus on Link Event
+    DEALER -> PBFT_NODES: Broadcasts LinkEventInput Transaction (via sender)
+    loop for each PBFT Node
+        PBFT_NODES -> PBFT_NODES: Receives Tx, adds to Pool
+    end
+    PBFT_NODES -> PBFT_NODES: Proposer includes Tx in Block
+    PBFT_NODES <-> PBFT_NODES: PBFT Consensus (Pre-Prepare, Prepare, Commit)
+end
+
+group Block Commit and Replica Notification
+    loop for each PBFT Node that commits the block
+        PBFT_NODES -> PBFT_NODES: Extracts LinkEventInput from committed block
+        PBFT_NODES -> POX_R_X: gRPC: NotifyLinkEvent(LinkEventInfo)
+        note right of PBFT_NODES : (Node X notifies its assigned Replica X)
+        POX_R_X -> POX_R_X: Updates internal topology_active_links
+        POX_R_X --> PBFT_NODES: gRPC: Empty (Ack)
+
+        PBFT_NODES -> POX_R_Y: gRPC: NotifyLinkEvent(LinkEventInfo)
+        note right of PBFT_NODES : (Node Y notifies its assigned Replica Y)\n(And so on for all N replicas)
+        POX_R_Y -> POX_R_Y: Updates internal topology_active_links
+        POX_R_Y --> PBFT_NODES: gRPC: Empty (Ack)
+    end
+end
+@enduml
