@@ -1,4 +1,7 @@
 !pox/ext/
 !pox/ext/.gitkeep
 test_runs/
-
+venv
+a.txt
+latex/latex.txt
+tests/analysis_plots/detailed_rtt_analysis_report.md

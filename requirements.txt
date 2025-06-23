@@ -1,0 +1,6 @@
+streamlit
+pandas
+streamlit-agraph
+pyyaml
+seaborn
+scipy

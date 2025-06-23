@@ -1,0 +1,16 @@
+@startuml
+' Diagram Title
+title Validation Component Interaction
+
+[PBFT Node] as Node
+[POX Replica] as Replica
+
+' Define the relationships
+Node -right-> Replica : 1. Asks for validation\n   (`CalculateAction` Request)
+Replica ..> Node : 2. Returns computed action\n   (`CalculateAction` Response)
+
+note on link
+  Node then performs an
+  internal comparison.
+end note
+@enduml

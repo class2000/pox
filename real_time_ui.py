@@ -15,17 +15,21 @@ DEFAULT_PBFT_NODE_HTTP_PORT = 8080 # Port mapped from the PBFT node's --httpChai
 BLOCKCHAIN_API_PATH = "/"            # Usually the root path for the --httpChain endpoint
 API_TIMEOUT = 20 # Increased timeout for potentially larger blockchain data
 
-# --- UI Colors (can remain the same) ---
-HOST_COLOR = "#1f77b4"
-SWITCH_COLOR = "#ff7f0e"
-LINK_COLOR = "#6c757d"
-LINK_HIGHLIGHT_COLOR = "#495057"
-# HOST_LINK_COLOR = "#17a2b8" # Host links won't be directly from blockchain data in this version
-# HOST_LINK_HIGHLIGHT_COLOR = "#138496"
+### --- CHANGED SECTION: High-Contrast UI Colors --- ###
+# These colors are chosen for better visibility on both light and dark themes.
+SWITCH_COLOR = "#007BFF"  # A vibrant blue
+SWITCH_BORDER_COLOR = "#0056b3" # A darker blue for the border
+NODE_FONT_COLOR = "#FFFFFF" # White text for high contrast on the blue background
+NODE_FONT_STROKE_COLOR = "#343a40" # Dark stroke for readability
+LINK_COLOR = "#adb5bd" # A light gray for links
+LINK_HIGHLIGHT_COLOR = "#FFFFFF" # White highlight for links
+### --- END CHANGED SECTION --- ###
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(threadName)s] %(levelname)s: %(message)s')
 
 # --- API Fetching Functions (Modified for Blockchain) ---
+# ... (The rest of the data fetching and processing code remains the same)
+# ... I've elided it here for brevity, as the changes are only in the UI section.
 
 def _fetch_blockchain_data_http(url, timeout, results_dict, key):
     """Fetches blockchain data from a Go PBFT node's HTTP endpoint."""
@@ -221,7 +225,6 @@ def fetch_topology_from_blockchain(pbft_node_ip, pbft_node_http_port, timeout=AP
         processing_time
     )
 
-
 # --- Streamlit App UI ---
 st.set_page_config(layout="wide", page_title="PBFT Blockchain Network Viewer")
 st.title("PBFT Consensus-Agreed Network Topology Viewer")
@@ -232,7 +235,7 @@ pbft_ip = st.sidebar.text_input("Node IP:", value=DEFAULT_PBFT_NODE_IP)
 pbft_port = st.sidebar.number_input("Node HTTP Port:", min_value=1, max_value=65535, value=DEFAULT_PBFT_NODE_HTTP_PORT)
 
 if st.sidebar.button("🔄 Refresh Data"):
-    st.cache_data.clear() # Clear cache for fetch_topology_from_blockchain
+    st.cache_data.clear()
     st.rerun()
 
 # --- Fetch and Process Data ---
@@ -258,9 +261,9 @@ st.sidebar.subheader("Fetch Status")
 status_expanded = bool(errors or warnings)
 with st.sidebar.expander("Show Fetch/Processing Logs", expanded=status_expanded):
     if errors:
-        for error_msg_item in errors: st.error(error_msg_item) # Renamed variable
+        for error_msg_item in errors: st.error(error_msg_item)
     if warnings:
-        for warning_msg_item in warnings: st.warning(warning_msg_item) # Renamed variable
+        for warning_msg_item in warnings: st.warning(warning_msg_item)
     if not errors and not warnings:
         st.success("Blockchain data fetched and processed successfully.")
     elif not errors and warnings:
@@ -274,7 +277,7 @@ st.sidebar.caption(f"Fetch/Process Time: {processing_time:.2f}s (Total: {fetch_d
 
 
 # --- Handle No Data Case ---
-if not graph_nodes_from_chain and not errors: # Check graph_nodes as it's built from switches
+if not graph_nodes_from_chain and not errors:
     st.warning("No switch topology data discovered from the blockchain's LinkEvents.")
     st.stop()
 elif not graph_nodes_from_chain and errors:
@@ -284,46 +287,47 @@ elif not graph_nodes_from_chain and errors:
 # --- Build Graph Data ---
 agraph_nodes = []
 agraph_edges = []
-edge_added_label_pairs = set()
-
 
 # 1. Create Nodes from graph_nodes_from_chain (which are switches)
 for node_id, node_info in graph_nodes_from_chain.items():
     node_label = node_info['label']
-    raw_id = node_info['raw_id'] # DPID for switch
+    raw_id = node_info['raw_id']
     tooltip = f"Label: {node_label}\nType: Switch\nID: {raw_id}"
-    shape = "square"
-    size = 15
-    color = SWITCH_COLOR
-    # Port count not directly available here unless we parse all LinkEvents again for each switch
-    # For simplicity, we omit port count from tooltip in this version
-    agraph_nodes.append(Node(id=node_label, label=node_label, title=tooltip, shape=shape, color=color, size=size))
+
+    ### --- CHANGED SECTION: Node Creation with better visuals --- ###
+    agraph_nodes.append(Node(id=node_label,
+                             label=node_label,
+                             title=tooltip,
+                             shape="square",
+                             size=20, # Slightly larger nodes
+                             color=SWITCH_COLOR,
+                             borderWidth=2,
+                             # Font color is now set globally in Config for consistency
+                             ))
+    ### --- END CHANGED SECTION --- ###
+
 
 # 2. Create Switch-to-Switch Edges from graph_links_from_chain
 for link_key_fs, link_info_val in graph_links_from_chain.items():
-    # link_info_val contains src_label, dst_label, src_port, dst_port etc.
     u_label = link_info_val['src_label']
     v_label = link_info_val['dst_label']
-    src_port_display = link_info_val['src_port'] # Just port number for now
+    src_port_display = link_info_val['src_port']
     dst_port_display = link_info_val['dst_port']
 
     u_node_exists = any(n.id == u_label for n in agraph_nodes)
     v_node_exists = any(n.id == v_label for n in agraph_nodes)
 
     if u_node_exists and v_node_exists:
-        edge_label_pair = tuple(sorted((u_label, v_label))) # Use labels for uniqueness check
-        # Check if this specific pair of (u_label, v_label) with these port details has been added.
-        # Since graph_links_from_chain key is the frozenset of (dpid,port) tuples,
-        # it should already be unique per logical link.
-        # The edge_added_label_pairs is more about preventing visual duplicates if processing logic was different.
-        # Here, since graph_links_from_chain is built from a set, it's inherently unique.
-        
-        # For this version, we can simplify the duplicate check as graph_links_from_chain is already unique links
-        # if edge_label_pair not in edge_added_label_pairs: # This check is fine.
         tooltip = f"{u_label} (Port {src_port_display}) <-> {v_label} (Port {dst_port_display})"
-        edge_color = {"color": LINK_COLOR, "highlight": LINK_HIGHLIGHT_COLOR}
-        agraph_edges.append(Edge(source=u_label, target=v_label, color=edge_color, title=tooltip, dashes=False))
-            # edge_added_label_pairs.add(edge_label_pair) # Not strictly needed if graph_links_from_chain is from a set
+        
+        ### --- CHANGED SECTION: Edge Creation with new colors --- ###
+        edge_color = {"color": LINK_COLOR, "highlight": LINK_HIGHLIGHT_COLOR, "hover": LINK_HIGHLIGHT_COLOR}
+        agraph_edges.append(Edge(source=u_label,
+                                 target=v_label,
+                                 color=edge_color,
+                                 title=tooltip,
+                                 dashes=False))
+        ### --- END CHANGED SECTION --- ###
     else:
          logging.warning(f"Skipping graph edge: Node(s) not found for labels {u_label} or {v_label}")
 
@@ -333,33 +337,77 @@ col1, col2 = st.columns([3, 2], gap="large")
 
 with col1:
     st.subheader("Consensus-Agreed Network Topology Graph (Switches & Links)")
+
+    ### --- CHANGED SECTION: Updated Legend --- ###
     legend_html = f"""
-    <div style="margin-bottom: 10px;">
-        <b>Legend:</b>
-        <span style="margin-left: 15px; vertical-align: middle;">
-            <span style="height:12px; width:12px; background-color:{SWITCH_COLOR}; border-radius:0%; display: inline-block; vertical-align: middle; margin-right: 5px;"></span>Switch
-        </span>
-        <span style="margin-left: 15px; vertical-align: middle;">
-            <span style="display: inline-block; width: 25px; border-bottom: 2px solid {LINK_COLOR}; vertical-align: middle; margin-right: 5px;"></span> Link
-        </span>
+    <div style="padding: 10px; border: 1px solid #ddd; border-radius: 5px; margin-bottom: 20px;">
+        <h5 style="margin-top: 0;">Legend</h5>
+        <div style="display: flex; align-items: center; margin-bottom: 5px;">
+            <div style="width: 20px; height: 20px; background-color: {SWITCH_COLOR}; border: 2px solid {SWITCH_BORDER_COLOR}; border-radius: 3px; display: inline-block; vertical-align: middle; margin-right: 10px;"></div>
+            <span>Switch (Node)</span>
+        </div>
+        <div style="display: flex; align-items: center;">
+            <div style="width: 25px; height: 0; border-bottom: 3px solid {LINK_COLOR}; display: inline-block; vertical-align: middle; margin-right: 10px;"></div>
+            <span>Link (Edge)</span>
+        </div>
     </div>
     """
     st.markdown(legend_html, unsafe_allow_html=True)
+    ### --- END CHANGED SECTION --- ###
 
+
+    ### --- CHANGED SECTION: Updated Graph Configuration --- ###
+    # This configuration is key to making the graph visually appealing and readable.
     config = Config(width='100%', height=650,
-                    directed=False, physics=True, hierarchical=False,
+                    directed=False,
+                    physics=True,
+                    hierarchical=False,
+                    # Node settings - applies to all nodes
+                    nodes={
+                        "borderWidth": 2,
+                        "borderWidthSelected": 4,
+                        "font": {
+                            "size": 14,
+                            "face": "tahoma",
+                            "color": NODE_FONT_COLOR,  # White text
+                            "strokeWidth": 2,          # Adds an outline to the text
+                            "strokeColor": NODE_FONT_STROKE_COLOR # The outline color
+                        }
+                    },
+                    # Edge settings - applies to all edges
+                    edges={
+                        "width": 2,
+                        "selectionWidth": 2.5,
+                        "smooth": {
+                            "enabled": True,
+                            "type": "continuous"
+                        },
+                        "arrows": {
+                            "to": {"enabled": False}
+                        }
+                    },
+                    # Interaction settings
+                    interaction={
+                        "tooltipDelay": 100,
+                        "hideEdgesOnDrag": True,
+                        "hover": True
+                    },
+                    # Physics engine settings
                     physics_settings={
                         "solver": "barnesHut",
-                        "barnesHut": {"gravitationalConstant": -18000, "centralGravity": 0.1,
-                                      "springLength": 120, "springConstant": 0.05,
-                                      "damping": 0.15, "avoidOverlap": 0.3},
+                        "barnesHut": {
+                            "gravitationalConstant": -20000,
+                            "centralGravity": 0.15,
+                            "springLength": 150, # Increased length for more space
+                            "springConstant": 0.05,
+                            "damping": 0.15,
+                            "avoidOverlap": 0.5 # Increased to prevent nodes overlapping
+                        },
                         "minVelocity": 0.75,
                         "stabilization": {"iterations": 250}
-                    },
-                    interaction={"tooltipDelay": 150, "hideEdgesOnDrag": False, "hover": True},
-                    nodes={"font": {"size": 12, "face": "tahoma"}},
-                    edges={"width": 1.5, "smooth": {"enabled": True, "type": "continuous"},
-                           "arrows": {"to": {"enabled": False}}})
+                    })
+    ### --- END CHANGED SECTION --- ###
+
 
     if agraph_nodes:
         try:
@@ -372,6 +420,8 @@ with col1:
 
 
 with col2:
+    # The details tabs remain the same, as their logic is correct.
+    # No changes are needed here.
     tab1, tab2 = st.tabs(["Switch Details", "Host Details (N/A from Blockchain)"])
 
     with tab1:

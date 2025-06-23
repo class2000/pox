@@ -1,0 +1,99 @@
+flowchart TD
+ subgraph subGraph1["External & Data Plane"]
+    direction LR
+    subgraph SDN_Data_Plane_Styled["SDN Data Plane"]
+        direction LR
+        H1["Host 1"]
+        H2["Host 2"]
+        SW1["Switch 1 OF"]
+        SW2["Switch 2 OF"]
+    end
+  end
+
+ subgraph subGraph2["SDN Control Plane"]
+    direction TB // Suggesting vertical arrangement for POX components
+    PXP["POX Primary"]
+    PXR0["POX Replica 0"]
+    PXR1["POX Replica 1"]
+    PXR2["POX Replica 2"]
+    PXR3["POX Replica 3"]
+  end
+
+ subgraph subGraph3["PBFT Consensus Network (Go Components)"]
+    direction TB // Suggesting vertical arrangement for PBFT core
+    Bootstrap["PBFT Bootstrap"]
+    Dealer["PBFT Dealer"]
+    Node0["PBFT Node 0"]
+    Node1["PBFT Node 1"]
+    Node2["PBFT Node 2"]
+    Node3["PBFT Node 3"]
+  end
+
+    H1 --- SW1
+    H2 --- SW2
+    SW1 --- SW2
+
+    SW1 -- "PktIn/LLDP" --> PXP
+    SW2 -- "PktIn/LLDP" --> PXP
+    PXP -- "PktOut/FlowMod" --> SW1
+    PXP -- "PktOut/FlowMod" --> SW2
+
+    PXP -- "gRPC: RequestConsensus(SdnAction)" --> Dealer
+    PXP -- "gRPC: ReportLinkEvent(LinkInfo)" --> Dealer
+
+    Dealer -- "PBFT Tx Bcast\n(SdnAction/LinkEvent)" --> Node0
+    Dealer -- "PBFT Tx Bcast\n(SdnAction/LinkEvent)" --> Node1
+    Dealer -- "PBFT Tx Bcast\n(SdnAction/LinkEvent)" --> Node2
+    Dealer -- "PBFT Tx Bcast\n(SdnAction/LinkEvent)" --> Node3
+    %% Alternatively, for a more compact representation if needed:
+    %% Dealer -- "PBFT Tx Bcast\n(SdnAction/LinkEvent)" --> Node0 & Node1 & Node2 & Node3
+
+    Node0 -- "ConsensusResult\n(P:5000)" --> Dealer
+    Node1 -- "ConsensusResult\n(P:5000)" --> Dealer
+    Node2 -- "ConsensusResult\n(P:5000)" --> Dealer
+    Node3 -- "ConsensusResult\n(P:5000)" --> Dealer
+    %% Alternatively:
+    %% Node0 & Node1 & Node2 & Node3 -- "ConsensusResult\n(P:5000)" --> Dealer
+
+    Node0 <--> Node1
+    Node0 <--> Node2
+    Node0 <--> Node3
+    Node1 <--> Node2
+    Node1 <--> Node3
+    Node2 <--> Node3
+
+    Node0 -.-> Bootstrap
+    Node1 -.-> Bootstrap
+    Node2 -.-> Bootstrap
+    Node3 -.-> Bootstrap
+    Dealer -.-> Bootstrap
+
+    Node0 -- "gRPC: CalculateAction(PktInfo)" --> PXR0
+    PXR0 -- "gRPC: ActionResponse" --> Node0
+    Node0 -- "gRPC: NotifyLinkEvent(LinkInfo)" --> PXR0
+    PXR0 -- "gRPC: Empty" --> Node0
+
+    Node1 <== "gRPC (P:50053)" ==> PXR1
+    Node2 <== "gRPC (P:50054)" ==> PXR2
+    Node3 <== "gRPC (P:50055)" ==> PXR3
+
+     H1:::sdn_data_node
+     H2:::sdn_data_node
+     SW1:::sdn_data_node
+     SW2:::sdn_data_node
+     PXP:::pox
+     PXR0:::pox
+     PXR1:::pox
+     PXR2:::pox
+     PXR3:::pox
+     Bootstrap:::pbft_go
+     Dealer:::pbft_go
+     Node0:::pbft_go
+     Node1:::pbft_go
+     Node2:::pbft_go
+     Node3:::pbft_go
+    classDef pox fill:#f9f,stroke:#333,stroke-width:2px
+    classDef pbft_go fill:#9cf,stroke:#333,stroke-width:2px
+    classDef sdn_data_node fill:#d3d3d3,stroke:#333,stroke-width:1px
+    classDef external fill:#white,stroke:#333,stroke-width:2px
+    style SDN_Data_Plane_Styled fill:#e6e6fa,stroke:#333,stroke-width:1px

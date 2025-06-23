@@ -1,0 +1,60 @@
+@startuml
+title Consensus Layer: Startup and Interaction Flow
+
+' Use a modern theme
+!theme vibrant
+
+' Sequence diagram visual tweaks
+skinparam sequenceArrowThickness 2
+skinparam ParticipantPadding 20
+skinparam BoxPadding 10
+
+' Define the participants
+participant "Bootstrap Server" as Bootstrap
+participant "PBFT Dealer" as Dealer
+participant "PBFT Node (New)" as NewNode
+participant "PBFT Node (Existing)" as ExistingNode
+
+group Node Startup & Peer Discovery
+    NewNode -> Bootstrap : 1. Register Listening Address
+    activate NewNode
+    activate Bootstrap
+    Bootstrap --> NewNode : 2. Receive List of Peers
+    deactivate Bootstrap
+
+    alt First Node Joins
+        NewNode -> NewNode : (Becomes first peer in network)
+    else Subsequent Node Joins
+        NewNode -> ExistingNode : 3. Establish P2P Connection
+        activate ExistingNode
+        ExistingNode --> NewNode : (Acknowledge)
+        deactivate ExistingNode
+    end
+    deactivate NewNode
+end
+
+group Dealer Startup
+    Dealer -> Bootstrap : 4. Request List of Nodes
+    activate Dealer
+    activate Bootstrap
+    Bootstrap --> Dealer : 5. Receive List of Nodes
+    deactivate Bootstrap
+    deactivate Dealer
+end
+
+... Runtime ...
+
+group Runtime Operation
+    note over Dealer : Receives request from POX Primary
+    Dealer -> NewNode : 6a. Broadcast PBFT Transaction
+    Dealer -> ExistingNode : 6b. Broadcast PBFT Transaction
+
+    note over NewNode, ExistingNode : 7. P2P Consensus Protocol\n(Pre-Prepare, Prepare, Commit)
+    NewNode <-> ExistingNode
+
+    NewNode -> Dealer : 8. Send ConsensusResult
+    activate Dealer
+    ExistingNode -> Dealer : 8. Send ConsensusResult
+    deactivate Dealer
+end
+@enduml

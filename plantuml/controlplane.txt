@@ -1,0 +1,37 @@
+@startuml
+' Apply a theme for better visuals
+!theme vibrant
+
+' Title
+title Detailed Component Diagram: SDN Control Plane Roles & Interactions
+
+' Use packages to group related system parts
+package "SDN Control Plane (Python/POX)" #LightSkyBlue {
+  
+  component "POX Primary" as Primary <<Active>> #LightGreen
+  
+  folder "POX Replicas (N instances)" as ReplicaGroup #LightGray {
+    component "POX Replica" as Replica <<Passive>>
+  }
+  
+  ' Relationship within the control plane package (logical)
+  ' The primary's logic is validated by the replicas, but the interaction is indirect
+  ' We show this via the PBFT Node
+}
+
+package "PBFT Consensus Network (Go)" #LightGoldenRodYellow {
+  component "PBFT Dealer" as Dealer
+  component "PBFT Node" as Node
+}
+
+database "Data Plane" as Switches
+
+' --- Define Interactions ---
+
+' Primary Controller's Interactions
+Primary -down-> Switches : Manages Data Plane (via OpenFlow)
+Primary --> Dealer : 1. Proposes Actions & Link Events (gRPC)
+
+' PBFT Node's Interaction with its Replica
+Node --> Replica : 2. Requests Validation (`CalculateAction` gRPC)
+@enduml
