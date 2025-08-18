@@ -47,10 +47,11 @@ end
 group UI Fetches and Displays Topology
     USER -> UI: Opens/Refreshes Topology Viewer
     UI -> PBFT_NODES: HTTP GET /fetches entire blockchain JSON\n(from one PBFT Node's httpChain endpoint)
+    note right of UI : Typically queries one designated node,\n but any node should have the committed chain
     PBFT_NODES --> UI: HTTP Response (JSON Array of Blocks)
     UI -> UI: Parses Blocks, extracts all LinkEventInput Txs
     UI -> UI: Reconstructs active_links_from_chain (topology)
     UI -> USER: Displays Network Graph & Switch Details
-    note right of UI : Typically queries one designated node,\n but any node should have the committed chain
+    
 end
 @enduml
